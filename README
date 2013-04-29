@@ -1,0 +1,326 @@
+Copyright (c) 2012, Nokia Siemens Networks
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of Nokia Siemens Networks nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+====================================================================================================
+Table of Contents
+====================================================================================================
+1. Open Event Machine
+2. Dependencies
+3. Installation
+4. Compilation
+5. Examples / Test Cases
+6. Changes
+7. Open Issues
+8. Timers
+9. Notes
+
+
+====================================================================================================
+1. Open Event Machine (OpenEM or EM)
+====================================================================================================
+License:
+- OpenEM     - See the beginning of this file or the event_machine/LICENSE file.
+- Intel DPDK - See the DPDK source code.
+
+
+Note: Read the Open Event Machine API, especially the event_machine.h file, for a more
+      thorough description about the functionality.
+
+
+Open Event Machine is a lightweight, load balancing, event processing runtime targeting multicore
+SoC data plane environments.
+
+This release of the Open Event Machine contains the OpenEM API as well as a SW implementation
+for Intel multicore CPUs.
+
+
+The Event Machine, developed by NSN, is a multicore optimized, high performance, data 
+plane processing concept based on asynchronous queues and event scheduling. 
+Applications are built from Execution Objects (EO), events and event queues. 
+The EO is a run-to-completion object that gets called at each event receive. 
+Communication is built around events and event queues. The EM scheduler selects 
+an event from a queue based on priority, and calls the EO's receive function 
+for event processing. The EO might send events to other EOs or HW-accelerators 
+for further processing or output. The next event for the core is selected only 
+after the EO has returned. The selected queue type, queue priority and queue 
+group affects the scheduling. Dynamic load balancing of work between the cores 
+is the default behaviour.
+
+
+The implementation of OpenEM for Intel CPUs in this package should NOT be considered a 
+"Reference OpenEM implementation", but rather an "Example of a SW-implementation of OpenEM
+for Intel CPUs". Most functionality described in the event_machine.h is supported by the Intel version.
+Strict per-event load balanced and priority based scheduling has been relaxed in favor of performance:
+E.g. events are scheduled in bursts rather than on an event-by-event basis and priority scheduling is
+performed separately for each queue group&type instead of always taking into account all queues/events
+on the whole device. Only four (4) queue priority levels are used to speed-up the scheduling.
+
+
+====================================================================================================
+2. Dependencies
+====================================================================================================
+To be able to build and run the Open Event Machine for Intel, you need the following
+environment, tools and SW packages:
+
+Environment:
+- x86 Intel multicore CPU and Linux
+- 1GE or 10GE NICs supported by the Intel DPDK package (if using packet I/O)
+
+Tools:
+- Compilers: GCC or ICC
+- GNU Make
+
+SW packages:
+- Intel DPDK 1.2
+
+Note: The setup used in testing:
+- Intel Westmere or Sandy Bridge based Xeon E5 multicore processor
+- Intel 82599 10 Gigabit Ethernet Controller
+- Ubuntu 11.04, kernel 2.6.38-11-generic (kernel options added):
+    default_hugepagesz=1G hugepagesz=1G hugepages=4
+- GCC 4.5.2 or
+- ICC 12.1.3 20120212, 12.1.6 20120821
+- GNU Make 3.81
+- Intel DPDK 1.2, 1.2.3-3
+
+
+====================================================================================================
+3. Installation
+====================================================================================================
+First install the needed tools and SW packages. Install the Intel DPDK software
+according to the DPDK installation guide.
+
+The Open Event Machine package consists of source code and is installed simply
+by extracing the source from the archive-file.
+
+
+====================================================================================================
+4. Compilation
+====================================================================================================
+
+Changes to the DPDK standard config for OpenEM:
+(#=original value, followed by used value)
+
+Note: Especially the memory related config values could be smaller, depending much on the application.
+
+
+#CONFIG_RTE_MAX_MEMSEG=32
+CONFIG_RTE_MAX_MEMSEG=64
+
+#CONFIG_RTE_MAX_MEMZONE=512
+CONFIG_RTE_MAX_MEMZONE=1048576
+
+#CONFIG_RTE_LIBEAL_USE_HPET=y (related to event_timer usage - HPET usage seems too slow)
+CONFIG_RTE_LIBEAL_USE_HPET=n
+
+#CONFIG_RTE_LIBRTE_IGB_PMD=y (if you want to run using 1GE IFs then keep this as 'y', tests have been run with 10GE IFs)
+CONFIG_RTE_LIBRTE_IGB_PMD=n
+
+#CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE=512
+CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE=2048
+
+#CONFIG_RTE_MBUF_SCATTER_GATHER=y
+CONFIG_RTE_MBUF_SCATTER_GATHER=n
+
+#CONFIG_RTE_MBUF_REFCNT_ATOMIC=y
+CONFIG_RTE_MBUF_REFCNT_ATOMIC=n
+
+
+
+Recompile DPDK with these changes before comiling and running the Open Event Machine
+tests.
+
+
+A) Compile & run the example test cases
+1. > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel
+
+2. Open the {OPEN EVENT MACHINE DIR}/event_test/example/intel/Makefile
+   and edit the following text to select testcase:
+     #
+     # Choose Test Case (only _ONE_ of the defines below can be set at a time!)
+     #
+     CFLAGS += -DTEST_APPL_HELLO
+     #CFLAGS += -DTEST_APPL_PERF
+     #CFLAGS += -DTEST_APPL_EVENT_GROUP
+     #CFLAGS += -DTEST_APPL_ERROR
+
+3. > make clean
+4. > make
+5. > sudo ./build/test_appl -c 0xfe -n 4
+
+Note: the "-c 0xfe -n 4" are DPDK command line options, see the DPDK manuals.
+  -c COREMASK: hexadecimal bitmask of cores we are running on,
+     here 0xfe = start 7 cores: 1-7, 0 left for Linux
+  -n NUM     : force number of memory channels (don't detect)
+     here we forced this to 4 to match the test system
+
+
+
+B) Compile & run the packet I/O test cases
+
+1. > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
+
+2. Open the {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel/Makefile
+   and edit the following text to select testcase:
+     #
+     # Choose Test Case (only _ONE_ of the defines below can be set at a time!)
+     #
+     CFLAGS += -DPACKET_LOOPBACK
+     #CFLAGS += -DPACKET_MULTI_STAGE
+
+3. > make clean
+4. > make
+5. > sudo ./build/packet_io -c 0xfe -n 4
+
+
+====================================================================================================
+5. Examples / Test Cases
+====================================================================================================
+The package contains a set of examples / test cases.
+
+A) Basic standalone Examples - does not require any external input or I/O,
+   just compile and run to get output/results.
+
+   Select the test case in the Makefile as described in section 4. The selected
+   application will be launched from em_app_init_global() in example_test_init.c
+
+{OPEN EVENT MACHINE DIR}/event_test/example/
+  - test_appl_hello.c
+    Simple "Hello World" example the Event Machine way.
+
+  - test_appl_perf.c
+    Measures and prints the average cycles consumed in an event send - sched - receive loop.
+
+  - test_appl_error.c
+    Demonstrate the EM error handling API.
+
+  - test_appl_event_group.c
+    Tests and measures the event group feature for fork-join type of operations using events.
+
+
+B) Simple Packet I/O examples - used together with an external traffic generator.
+
+   Select the test case in the Makefile as described in section 4. The selected application
+   will be launched from em_app_init_global() in packet_test_init.c
+
+   These tests assume that the test system is equipped with at least one NIC fo the following type:
+   - Intel 82599 10 Gigabit Ethernet Controller.
+
+{OPEN EVENT MACHINE DIR}/event_test/packet_io/
+  - packet_loopback.c
+    Simple Load Balanced Packet-I/O test application. Receives UDP/IP packets,
+    swaps the addresses/ports and sends the packets back to where they came from.
+    The test expects the traffic generator to send data using 4096 UDP-flows:
+      - 4 IP dst addresses each with 1024 different UDP dst ports (=flows).
+        Alternatively setting "#define QUEUE_PER_FLOW 0" will accept any packets,
+        but uses only a single default EM queue, thus limiting performance.
+
+  - packet_multi_stage.c
+    Similar packet-I/O example as packet_loopback, except that each UDP-flow is handled in
+    three (3) stages before sending back out. The three stages (3 EOs) causes each packet be 
+    enqueued, scheduled and received multiple times on the multicore CPU.
+    Additionally this test uses EM queues of different priority and type.
+
+    The test expects the traffic generator to send data using 1024 UDP-flows:
+      - 4 IP dst addresses each with 256 different UDP dst ports (=flows).
+
+
+====================================================================================================
+6. Changes
+====================================================================================================
+Changes to Open Event Machine 1.0:
+- Created.
+
+====================================================================================================
+7. Open Issues
+====================================================================================================
+- em_atomic_processing_end() not implemented - currently just return. The solution must take event
+  dequeue-bursts into consideration.
+
+====================================================================================================
+8. Timers
+====================================================================================================
+Note: The event_timer is not a part of OpenEM. The current timer API, functionality and implementation
+      may change later on. The Intel version is an experimental feature.
+
+Timer usage with OpenEM:
+
+The OpenEM package contains the event_timer/ directory with source code for setting up and using
+an event based timeout mechanism. 'Event based' means that upon timeout a given event is sent to a 
+given queue:
+  evt_request_timeout(timeout, event, queue, cancel);
+    timeout - timeout/tick value specifying when to send 'event' to 'queue'
+    event   - user allocated & filled input event that gets sent at 'timeout'
+    queue   - destination queue into which 'event' is sent
+    cancel  - timeout cancel handle
+  
+Include the em_timer.mk file in your application Makefile to enable the event timer:
+include $(EVENT_TIMER_DIR)/intel/em_timer.mk
+
+OpenEM sets up the event timer (if used) at startup and calls manage() during runtime. The application
+can immediately start using timeouts through the API calls evt_request_timeout(), evt_cancel_timeout() etc.
+
+No example test application is currently included - TBD.
+
+====================================================================================================
+9. Notes
+====================================================================================================
+Miscellaneous notes regarding the OpenEM usage and performance.
+
+9.1 OpenEM Configuration parameters:
+
+- RX_DIRECT_DISPATCH - 0(disabled=default) or 1(enabled) in event_machine/intel/em_intel_packet.h
+
+  /**
+   * Eth Rx Direct Dispatch: if enabled (=1) will try to dispatch the input Eth Rx event
+   * for processing as fast as possible by bypassing the event scheduler queues.
+   * Direct dispatch will, however, preserve packet order for each flow and for atomic
+   * flows/queues also the atomic context is maintained.
+   * Directly dispatching an event reduces the number of enqueue+dequeue operations and keeps the 
+   * event processing on the same core as it was received on, thus giving better performance.
+   * Event priority handling is weakened by enabling direct dispatch as newer events
+   * can be dipatched before older events (of another flow) that are enqueued in the scheduling
+   * queues - this is the reason why it has been set to '0' by default. An application that do
+   * not care about strict priority cound significantly benefit from enabling this feature.
+   */
+  #define RX_DIRECT_DISPATCH     (0) // 0=Off(lower performance,  better priority handling)
+                                     // 1=On (better performance, weaker priority)
+
+
+
+9.2 Event bursting:
+
+To improve performance & throughput events are dequeued from the scheduling queues and eth-ports
+in bursts rather than one-by-one. The best event load balancing and priority handling over all cores 
+would be obtained by dequeing/enqueueing one event at a time, but since this severely decreases throughput,
+it has been decided to allow bursting to favor performance.
+The defines MAX_Q_BULK_ATOMIC&MAX_E_BULK_ATOMIC, MAX_E_BULK_PARALLEL and MAX_E_BULK_PARALLEL_ORD can be tuned
+to change the dequeue burst sizes in the scheduler (em_intel_sched.c)
+Eth Rx and Tx burst sizes can be changed through the MAX_RX_PKT_BURST and MAX_TX_PKT_BURST defines (em_intel_packet.c)
+
+
+
+

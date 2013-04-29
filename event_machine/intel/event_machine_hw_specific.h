@@ -29,8 +29,10 @@
 /**
  * @file
  *
- * EM HW specific functions 
+ * Event Machine HW specific functions and other additions.
+ *
  */
+ 
 #ifndef EVENT_MACHINE_HW_SPECIFIC_H
 #define EVENT_MACHINE_HW_SPECIFIC_H
 
@@ -41,11 +43,77 @@ extern "C" {
 #endif
 
 
-#include <event_machine_group.h>
+#include <event_machine_group.h> /* for inline em_send() */
+
 
 
 /**
- * Send an event to a queue.
+ * Initialize the Event Machine.
+ *
+ * Called once at startup. Additionally each EM-core needs to call the 
+ * em_init_core() function before using any further EM API functions/resources.
+ *
+ * @param conf   EM runtime config options
+ *
+ * @return EM_OK if successful.
+ * 
+ * @see em_init_core() for EM-core specific init after em_init().
+ */
+em_status_t
+em_init(em_conf_t *conf);
+
+
+
+/**
+ * Initialize an EM-core.
+ *
+ * Called by each EM-core (= process, thread or baremetal core). 
+ * EM queues, EOs, queue groups etc. can be created after a succesful return from this function.
+ *
+ * @return EM_OK if successful.
+ *
+ * @see em_init()
+ */
+em_status_t
+em_init_core(void);
+
+
+
+
+/**
+ * EM event dispatch.
+ * 
+ * Called by each EM-core to dispatch events for EM processing.
+ *
+ * @param rounds   Dispatch rounds before returning, 0 means 'never return from dispatch'
+ */
+void
+em_dispatch(uint32_t rounds);
+
+
+
+/**
+ * Get pointer to event structure
+ *
+ * Returns pointer to the event structure or NULL. Event structure is
+ * implementation and event type specific. It may be a directly 
+ * accessible buffer of memory, a descriptor containing a list of 
+ * buffer pointers, a descriptor of a packet buffer, etc.
+ *
+ * @param event   Event from receive/alloc
+ *
+ * @return Event pointer or NULL
+ */
+static inline void*
+em_event_pointer(em_event_t event)
+{
+  return event;
+}
+
+
+
+/**
+ * Send an event to a queue (inline implementation, definition in event_machine.h)
  *
  * Event must have been allocated with em_alloc(), or
  * received via receive-function. Sender must not touch the
@@ -73,29 +141,14 @@ em_send(em_event_t event, em_queue_t queue)
 }
 
 
-/**
- * HW specific init and inlined functions (if any)
- */
-
 
 /**
- * Global initialization of EM internals. Only one core does this and this must be called
- * before any other call.
- *
- * @return status, EM_OK on success
+ * Helper func - is this the first EM-core?
+ * 
+ * @return  'true' if the caller is running on the first EM-core
  */
-em_status_t em_init_global(void);
-
-
-/**
- * Local initialization of EM internals. All cores call this and it must be called
- * after em_init_global(), but before any other call.
- * Implementation may be actually empty, but this might be needed later for some
- * core specific initializations, so application startup should call this always.
- *
- * @return status, EM_OK on success
- */
-em_status_t em_init_local(void);
+int
+em_is_first_core(void);
 
 
 

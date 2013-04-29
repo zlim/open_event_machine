@@ -27,28 +27,76 @@
 
 
 #
-# Event Timer makefile for Intel
+# Event Machine library makefile
 #
 
+# Project root taken from the path of this makefile because the DPDK build system seems to call this makefile twice:
+#  1. make to create ./build/ directory, and then 
+#  2. call make from the build directory (make -C build -f this_makefile ...)
+PROJECT_ROOT      := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+EVENT_MACHINE_DIR := $(PROJECT_ROOT)/event_machine
+EVENT_TIMER_DIR   := $(PROJECT_ROOT)/event_timer
+
+
+# binary name
+LIB    = libem.a
+# 
+SRCS-y = 
+
+
+
+ifeq ($(RTE_SDK),)
+$(error "Please define RTE_SDK environment variable")
+endif
+
+
+# Default target, can be overriden by command line or environment
+RTE_TARGET ?= x86_64-default-linuxapp-gcc
+
+include $(RTE_SDK)/mk/rte.vars.mk
+
+
+
+#CFLAGS += $(WERROR_FLAGS)
+
+# workaround for a gcc bug with noreturn attribute
+# http://gcc.gnu.org/bugzilla/show_bug.cgi?id=12603
+ifeq ($(CONFIG_RTE_TOOLCHAIN_GCC),y)
+CFLAGS_main.o += -Wno-return-type
+endif
+
+
+EXTRA_CFLAGS += -O3 -g -fstrict-aliasing
+
+
+# Enable packet IO
+CFLAGS += -DEVENT_PACKET # Set, if packet_io is needed
+# Enable event timer
+CFLAGS += -DEVENT_TIMER  # Set, if event timer is needed
+
 
 #
-# Includes
+# Event Machine sources
 #
-CFLAGS += -I$(EVENT_TIMER_DIR)/intel
-
-
-
-#
-# Defines
-#
-#CFLAGS += -DEVENT_TIMER
+include $(EVENT_MACHINE_DIR)/intel/em_intel.mk
+SRCS-y += $(EM_SRCS)
 
 
 #
-# Source files
+# Event Timer sources
 #
+include $(EVENT_TIMER_DIR)/intel/em_timer.mk
+SRCS-y += $(EVENT_TIMER_SRCS)
 
-# Event Machine
-EVENT_TIMER_SRCS   = $(EVENT_TIMER_DIR)/intel/event_timer.c
-#EVENT_TIMER_SRCS  += 
+
+#
+# Last
+#
+include $(RTE_SDK)/mk/rte.extlib.mk
+
+
+.PHONY: real_clean
+real_clean: clean
+	rm -fr $(RTE_OUTPUT)/lib
+
 

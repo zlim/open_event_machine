@@ -256,12 +256,12 @@ ENV_SHARED static  struct ether_addr  port_eth_addr[MAX_ETH_PORTS];
 /**
  * Eth port configuration
  */
-ENV_SHARED static const struct rte_eth_conf  eth_port_conf = {
+ENV_SHARED static const  struct rte_eth_conf  eth_port_conf = {
   .rxmode = {
+    .max_rx_pkt_len = ETHER_MAX_LEN,
     .mq_mode        = ETH_RSS, /* Receive Side Scaling, on Niantic up to 16 Rx eth-queues */
     .split_hdr_size = 0,
     .header_split   = 0, /**< Header Split disabled */
-    //.hw_ip_checksum = 0, /**< IP checksum offload disabled */
     .hw_ip_checksum = 1, /**< IP checksum offload enabled */
     .hw_vlan_filter = 0, /**< VLAN filtering disabled */
     .jumbo_frame    = 0, /**< Jumbo Frame Support disabled */
@@ -282,12 +282,13 @@ ENV_SHARED static const struct rte_eth_conf  eth_port_conf = {
 /**
  * Eth Rx configuration
  */
-ENV_SHARED static const struct rte_eth_rxconf  eth_rx_conf = {
+ENV_SHARED static const  struct rte_eth_rxconf  eth_rx_conf = {
   .rx_thresh = {
     .pthresh = RX_PTHRESH,
     .hthresh = RX_HTHRESH,
     .wthresh = RX_WTHRESH,
   },
+  //.rx_free_thresh = 32, suggested value, but when set gives worse perf.
 };
 
 
@@ -295,7 +296,7 @@ ENV_SHARED static const struct rte_eth_rxconf  eth_rx_conf = {
 /**
  * Eth Tx configuration
  */
-ENV_SHARED static const struct rte_eth_txconf  eth_tx_conf = {
+ENV_SHARED static const  struct rte_eth_txconf  eth_tx_conf = {
   .tx_thresh = {
     .pthresh = TX_PTHRESH,
     .hthresh = TX_HTHRESH,

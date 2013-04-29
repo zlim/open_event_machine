@@ -25,100 +25,46 @@
 #  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
+EXAMPLES    := packet_loopback  packet_multi_stage
 
-#
-#  Makefile
-#
-#
+BUILD_DIR = ./build
 
-PROJECT_ROOT      := $(dir $(MAKEFILE_LIST))../../..
-EVENT_MACHINE_DIR := $(PROJECT_ROOT)/event_machine
-EVENT_TEST_DIR    := $(PROJECT_ROOT)/event_test
-PACKET_IO_DIR     := $(EVENT_TEST_DIR)/packet_io
+EXECUTABLES    := $(foreach example,$(EXAMPLES),$(BUILD_DIR)/$(example))
+EXAMPLES_CLEAN := $(foreach example,$(EXAMPLES),$(example)_clean)
 
 
-
-# binary name
-APP    = packet_io
-# 
-SRCS-y = 
+.PHONY: all
+all: $(EXAMPLES)
 
 
-
-ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
-endif
+.PHONY: $(EXAMPLES)
+$(EXAMPLES): %: $(BUILD_DIR)/%
 
 
-# Default target, can be overriden by command line or environment
-RTE_TARGET ?= x86_64-default-linuxapp-gcc
+$(EXECUTABLES):
+	@echo
+	@echo "**************************************************"
+	@echo "Building EM example - $@:"
+	@echo "**************************************************"
+	@$(MAKE) -f packet_io.mk M=packet_io.mk O=$(BUILD_DIR) APPL=$(notdir $@)
 
-include $(RTE_SDK)/mk/rte.vars.mk
-
-
-#CFLAGS += $(WERROR_FLAGS)
-
-# workaround for a gcc bug with noreturn attribute
-# http://gcc.gnu.org/bugzilla/show_bug.cgi?id=12603
-ifeq ($(CONFIG_RTE_TOOLCHAIN_GCC),y)
-CFLAGS_main.o += -Wno-return-type
-endif
+	
+.PHONY: clean
+clean: $(EXAMPLES_CLEAN)
 
 
-EXTRA_CFLAGS += -O3 -g -fstrict-aliasing
+.PHONY: $(EXAMPLES_CLEAN)
+$(EXAMPLES_CLEAN):
+	@$(MAKE) -s -f packet_io.mk M=packet_io.mk O=$(BUILD_DIR) APPL=$(@:%_clean=%) clean
 
 
-#
-# Event machine for Intel
-#
-include $(EVENT_MACHINE_DIR)/intel/em_intel.mk
-# EM-Intel Packet-IO enabled:
-CFLAGS += -DEVENT_PACKET
-
-CFLAGS += -I$(PACKET_IO_DIR)/intel
-
-
-#
-# Choose Test Case (only _ONE_ of the defines below can be set at a time!)
-#
-CFLAGS += -DPACKET_LOOPBACK
-#CFLAGS += -DPACKET_MULTI_STAGE
-
-
-
-#
-# Test Case Source Code
-#
-ALL_TEST_SRCS   = 
-ALL_TEST_SRCS  += $(PACKET_IO_DIR)/packet_test_init.c
-ALL_TEST_SRCS  += $(PACKET_IO_DIR)/packet_loopback.c
-ALL_TEST_SRCS  += $(PACKET_IO_DIR)/packet_multi_stage.c
-
-
-
-# Intel RTE expects all sources to be in SRCS-y
-SRCS-y += $(ALL_TEST_SRCS)
-
-
-# Object files (all except example_init_%.o)
-ALL_TEST_OBJS = $(foreach obj,$(notdir $(ALL_TEST_SRCS:.c=.o)),$(OBJ_DIR)/$(obj))
-
-
-# Append to the all-souce-files variable (for tag-generation)
-ALL_SRCS += $(ALL_TEST_SRCS)
-
-
-
-
-#
-# Last
-#
-include $(RTE_SDK)/mk/rte.extapp.mk
-
-
+.PHONY: real_clean
 real_clean: clean
-	rm -fr build
+	@$(MAKE) -s -f packet_io.mk M=packet_io.mk O=$(BUILD_DIR) real_clean
 
 
+.PHONY: em_clean
+em_clean:
+	@$(MAKE) -s -f packet_io.mk M=packet_io.mk O=$(BUILD_DIR) em_clean
 
 

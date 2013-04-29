@@ -50,15 +50,15 @@ Note: Read the Open Event Machine API, especially the event_machine.h file, for 
       thorough description about the functionality.
 
 
-Open Event Machine is a lightweight, load balancing, event processing runtime targeting multicore
-SoC data plane environments.
+Open Event Machine is a lightweight, dynamically load balancing, run-to-completion,
+event processing runtime targeting multicore SoC data plane environments.
 
 This release of the Open Event Machine contains the OpenEM API as well as a SW implementation
 for Intel multicore CPUs.
 
 
-The Event Machine, developed by NSN, is a multicore optimized, high performance, data 
-plane processing concept based on asynchronous queues and event scheduling. 
+The Event Machine, developed by NSN, is a multicore optimized, high performance,
+data plane processing concept based on asynchronous queues and event scheduling. 
 Applications are built from Execution Objects (EO), events and event queues. 
 The EO is a run-to-completion object that gets called at each event receive. 
 Communication is built around events and event queues. The EM scheduler selects 
@@ -94,7 +94,7 @@ Tools:
 - GNU Make
 
 SW packages:
-- Intel DPDK 1.2
+- Intel DPDK 1.2.3-3 (DPDK source code and documents: http://www.intel.com/go/dpdk)
 
 Note: The setup used in testing:
 - Intel Westmere or Sandy Bridge based Xeon E5 multicore processor
@@ -104,7 +104,7 @@ Note: The setup used in testing:
 - GCC 4.5.2 or
 - ICC 12.1.3 20120212, 12.1.6 20120821
 - GNU Make 3.81
-- Intel DPDK 1.2, 1.2.3-3
+- Intel DPDK 1.2.3-3
 
 
 ====================================================================================================
@@ -154,46 +154,63 @@ Recompile DPDK with these changes before comiling and running the Open Event Mac
 tests.
 
 
+
 A) Compile & run the example test cases
-1. > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel
+1. Change into the OpenEM-intel example directory
+  > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel
 
-2. Open the {OPEN EVENT MACHINE DIR}/event_test/example/intel/Makefile
-   and edit the following text to select testcase:
-     #
-     # Choose Test Case (only _ONE_ of the defines below can be set at a time!)
-     #
-     CFLAGS += -DTEST_APPL_HELLO
-     #CFLAGS += -DTEST_APPL_PERF
-     #CFLAGS += -DTEST_APPL_EVENT_GROUP
-     #CFLAGS += -DTEST_APPL_ERROR
-
-3. > make clean
-4. > make
-5. > sudo ./build/test_appl -c 0xfe -n 4
+2. Build the test applications: 'hello', 'perf', 'event_group' and 'error' 
+  > make
+  
+3. Run one of the compiled examples, e.g.:
+  > sudo ./build/hello -c 0xfe -n 4         (Run 'hello' on 7 cores)
+  > sudo ./build/perf -c 0xffff -n 4        (Run 'perf' on 16 cores)
+  > sudo ./build/event_group -c 0x0c0c -n 4 (Run 'event_group' on 4 cores)
+  > sudo ./build/error -c 0x3 -n 4          (Run 'error' on 2 cores)
 
 Note: the "-c 0xfe -n 4" are DPDK command line options, see the DPDK manuals.
   -c COREMASK: hexadecimal bitmask of cores we are running on,
      here 0xfe = start 7 cores: 1-7, 0 left for Linux
-  -n NUM     : force number of memory channels (don't detect)
+  -n NUM     : force number of memory channels
      here we forced this to 4 to match the test system
+
+Clean the example test case build: 
+  Clean the test applications:
+    > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel 
+    > make clean
+  Clean the test application and output directories 
+    > make real_clean
+  Clean the Open EM library 
+    > make em_clean
 
 
 
 B) Compile & run the packet I/O test cases
 
-1. > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
+1. Change into the OpenEM-intel packet-io directory
+  > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
 
-2. Open the {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel/Makefile
-   and edit the following text to select testcase:
-     #
-     # Choose Test Case (only _ONE_ of the defines below can be set at a time!)
-     #
-     CFLAGS += -DPACKET_LOOPBACK
-     #CFLAGS += -DPACKET_MULTI_STAGE
+2. Build the test applications: 'packet_loopback' and 'packet_multi_stage'
+  > make
+  
+3. Run one of the compiled examples, e.g.:
+  > sudo ./build/packet_loopback -c 0xfe -n 4       (Run 'packet_loopback' on 7 cores)
+  > sudo ./build/packet_multi_stage -c 0xffff -n 4  (Run 'packet_multi_stage' on 16 cores)
 
-3. > make clean
-4. > make
-5. > sudo ./build/packet_io -c 0xfe -n 4
+Note: the "-c 0xfe -n 4" are DPDK command line options, see the DPDK manuals.
+  -c COREMASK: hexadecimal bitmask of cores we are running on,
+     here 0xfe = start 7 cores: 1-7, 0 left for Linux
+  -n NUM     : force number of memory channels
+     here we forced this to 4 to match the test system
+
+Clean the packet-io test case build: 
+  Clean the test applications:
+    > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
+    > make clean
+  Clean the test application and output directories 
+    > make real_clean
+  Clean the Open EM library 
+    > make em_clean
 
 
 ====================================================================================================
@@ -201,57 +218,240 @@ B) Compile & run the packet I/O test cases
 ====================================================================================================
 The package contains a set of examples / test cases.
 
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 A) Basic standalone Examples - does not require any external input or I/O,
    just compile and run to get output/results.
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-   Select the test case in the Makefile as described in section 4. The selected
-   application will be launched from em_app_init_global() in example_test_init.c
+  Sources in directory: {OPEN EVENT MACHINE DIR}/event_test/example/  
+  
+  ---------------------------------------------------------
+  A1) test_appl_hello.c  (executable: 'hello')
+  ---------------------------------------------------------
+  Simple "Hello World" example the Event Machine way. 
+  
+  Creates two Execution Objects (EOs), each with a dedicated queue for incoming events,
+  and ping-pongs an event between the EOs while printing "Hello world" each time the
+  event is received. Note the changing core number in the printout below (the event is handled
+  by any core that is ready to take on new work):
 
-{OPEN EVENT MACHINE DIR}/event_test/example/
-  - test_appl_hello.c
-    Simple "Hello World" example the Event Machine way.
+  > sudo ./build/hello -c 0xff -n 4
+    ...    
+    Hello world started EO A. I'm EO 0. My queue is 320.
+    Hello world started EO B. I'm EO 1. My queue is 321.
+    Entering event dispatch loop() on EM-core 0
+    Hello world from EO A! My queue is 320. I'm on core 02. Event seq is 0.
+    Hello world from EO B! My queue is 321. I'm on core 04. Event seq is 1.
+    Hello world from EO A! My queue is 320. I'm on core 02. Event seq is 2.
+    Hello world from EO B! My queue is 321. I'm on core 05. Event seq is 3.
+    Hello world from EO A! My queue is 320. I'm on core 01. Event seq is 4.
+    Hello world from EO B! My queue is 321. I'm on core 04. Event seq is 5.
+    Hello world from EO A! My queue is 320. I'm on core 05. Event seq is 6.
+    Hello world from EO B! My queue is 321. I'm on core 06. Event seq is 7.
+    Hello world from EO A! My queue is 320. I'm on core 04. Event seq is 8.
+    Hello world from EO B! My queue is 321. I'm on core 07. Event seq is 9.
+    Hello world from EO A! My queue is 320. I'm on core 06. Event seq is 10.
+    ...
 
-  - test_appl_perf.c
-    Measures and prints the average cycles consumed in an event send - sched - receive loop.
+  ---------------------------------------------------------
+  A2) test_appl_perf.c  (executable: 'perf')
+  ---------------------------------------------------------
+  Measures and prints the average cycles consumed in an event send - sched - receive loop.
+  
+  Note that the cycles per event increases with a larger core count (try e.g 4 vs 8 cores).
+  Also note that the way EM-cores are mapped to HW threads matters - using HW threads on the
+  same CPU-core differs from using HW threads on separate cores.
 
-  - test_appl_error.c
-    Demonstrate the EM error handling API.
+  Run on 4 EM-cores:    
+  >  sudo ./build/perf -c 0xf -n 4  (4 HW threads on separate cores)
+  ...
+  cycles per event 255.89  @2693.25 MHz (core-03 2)
+  cycles per event 256.76  @2693.25 MHz (core-02 2)
+  cycles per event 257.59  @2693.25 MHz (core-01 2)
+  cycles per event 258.53  @2693.25 MHz (core-00 2)
+  cycles per event 255.96  @2693.25 MHz (core-03 3)
+  cycles per event 256.98  @2693.25 MHz (core-02 3)
+  cycles per event 257.12  @2693.25 MHz (core-01 3)
+  cycles per event 258.26  @2693.25 MHz (core-00 3)
+  ...
+  
+  Run on 8 EM-cores:
+  > sudo ./build/perf -c 0xff -n 4
+  ...
+  cycles per event 303.10  @2693.25 MHz (core-07 2)
+  cycles per event 304.63  @2693.25 MHz (core-01 2)
+  cycles per event 303.99  @2693.25 MHz (core-00 2)
+  cycles per event 305.61  @2693.25 MHz (core-05 2)
+  cycles per event 305.46  @2693.25 MHz (core-02 2)
+  cycles per event 306.48  @2693.25 MHz (core-03 2)
+  cycles per event 306.95  @2693.25 MHz (core-04 2)
+  cycles per event 321.63  @2693.25 MHz (core-06 2)
+  cycles per event 303.00  @2693.25 MHz (core-07 3)
+  cycles per event 303.85  @2693.25 MHz (core-00 3)
+  cycles per event 305.19  @2693.25 MHz (core-01 3)
+  cycles per event 305.14  @2693.25 MHz (core-05 3)
+  cycles per event 305.95  @2693.25 MHz (core-02 3)
+  cycles per event 306.27  @2693.25 MHz (core-03 3)
+  cycles per event 307.56  @2693.25 MHz (core-04 3)
+  cycles per event 304.29  @2693.25 MHz (core-06 3)
+  ...
+  
+  ---------------------------------------------------------
+  A3) test_appl_error.c  (executable: 'error')
+  ---------------------------------------------------------
+  Demonstrate and test the Event Machine error handling functionality,
 
-  - test_appl_event_group.c
-    Tests and measures the event group feature for fork-join type of operations using events.
+  Three application EOs are created, each with a dedicated queue. An application specific
+  global error handler is registered (thus replacing the EM default). Additionally EO A 
+  will register an EO specific error handler.
+  When the EOs receive events (error_receive) they will generate errors by explicit calls to
+  em_error() and by calling EM-API functions with invalid arguments.
+  The registered error handlers simply print the error information on screen.
+  
+  Note that we continue executing after a fatal error since these are only test-errors...
+
+  > sudo ./build/error -c 0xf -n 4
+  ...
+  Error log from EO C [0] on core 1!
+  THIS IS A FATAL ERROR!!
+  Appl Global error handler     : EO 2  error 0x8000DEAD  escope 0x0
+  Return from fatal.
+  
+  Error log from EO A [0] on core 2!
+  Appl EO specific error handler: EO 0  error 0x00001111  escope 0x1
+  Appl EO specific error handler: EO 0  error 0x00002222  escope 0x2 ARGS: Second error
+  Appl EO specific error handler: EO 0  error 0x00003333  escope 0x3 ARGS: Third  error 320
+  Appl EO specific error handler: EO 0  error 0x00004444  escope 0x4 ARGS: Fourth error 320 0
+  Appl EO specific error handler: EO 0  error 0x0000000A  escope 0xFF000402 - EM info:
+  EM ERROR:0x0000000A  ESCOPE:0xFF000402  EO:0-"EO A"  core:02 ecount:5(4)  em_free(L:2243) em_intel.c  event ptr NULL!
+  ...
+
+  ---------------------------------------------------------
+  A4) test_appl_event_group.c  (executable: 'event_group')
+  ---------------------------------------------------------
+  Tests and measures the event group feature for fork-join type of operations using events.
+  See the event_machine_group.h file for the event group API calls.
+  
+  An EO allocates and sends a number of data events to itself (using an event group)
+  to trigger a notification event to be sent when the configured event count
+  has been received. The cycles consumed until the notification is received is measured
+  and printed.
+  
+  Note: To keep things simple this testcase uses only a single queue into which to receive
+  all events, including the notification events. The event group fork-join mechanism does not
+  care about the used queues however, it's basically a counter of events sent using a certain 
+  event group id. In a more complex example each data event could be send from different
+  EO:s to different queues and the final notification event sent yet to another queue.    
+
+  > sudo ./build/event_group -c 0xf -n 4
+  ...
+  Start.
+  Done. Notification event received after 256 data events. Cycles curr:149944, ave:149944
+  
+  Start.
+  Done. Notification event received after 256 data events. Cycles curr:142339, ave:147409
+  
+  Start.
+  Done. Notification event received after 256 data events. Cycles curr:141217, ave:145861
+  ...
 
 
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 B) Simple Packet I/O examples - used together with an external traffic generator.
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-   Select the test case in the Makefile as described in section 4. The selected application
-   will be launched from em_app_init_global() in packet_test_init.c
+  These tests assume that the test system is equipped with at least one NIC fo the following type:
+    - Intel 82599 10 Gigabit Ethernet Controller.
 
-   These tests assume that the test system is equipped with at least one NIC fo the following type:
-   - Intel 82599 10 Gigabit Ethernet Controller.
+  Sources in directory: {OPEN EVENT MACHINE DIR}/event_test/packet_io/
+  
+  Packet-io enabled by setting: em_conf.pkt_io = 1 before calling em_init(&em_conf).
 
-{OPEN EVENT MACHINE DIR}/event_test/packet_io/
-  - packet_loopback.c
-    Simple Load Balanced Packet-I/O test application. Receives UDP/IP packets,
-    swaps the addresses/ports and sends the packets back to where they came from.
+  ---------------------------------------------------------
+  B1) packet_loopback.c  (executable: 'packet_loopback')
+  ---------------------------------------------------------  
+    Simple Dynamically Load Balanced Packet-I/O loopback test application.
+    
+    Receives UDP/IP packets, swaps the addresses/ports and sends the packets back to where they came from.
     The test expects the traffic generator to send data using 4096 UDP-flows:
       - 4 IP dst addresses each with 1024 different UDP dst ports (=flows).
         Alternatively setting "#define QUEUE_PER_FLOW 0" will accept any packets,
         but uses only a single default EM queue, thus limiting performance.
+    
+    Use the traffic generator to find the max sustainable throughput for loopback traffic.
+    The throughput should increase near-linearly with increasing core counts (set by -c 0xcoremask).
 
-  - packet_multi_stage.c
+
+  ---------------------------------------------------------
+  B2) packet_multi_stage.c  (executable: 'packet_multi_stage')
+  ---------------------------------------------------------
     Similar packet-I/O example as packet_loopback, except that each UDP-flow is handled in
     three (3) stages before sending back out. The three stages (3 EOs) causes each packet be 
-    enqueued, scheduled and received multiple times on the multicore CPU.
+    enqueued, scheduled and received multiple times on the multicore CPU, thus stressing the 
+    EM scheduler.
     Additionally this test uses EM queues of different priority and type.
 
     The test expects the traffic generator to send data using 1024 UDP-flows:
       - 4 IP dst addresses each with 256 different UDP dst ports (=flows).
 
+    Use the traffic generator to find the max sustainable throughput for multi-stage traffic.
+    The throughput should increase near-linearly with increasing core counts (set by -c 0xcoremask).
+    
 
 ====================================================================================================
 6. Changes
 ====================================================================================================
-Changes to Open Event Machine 1.0:
+
+Open Event Machine 1.1:
+- The Event Machine is compiled into a static library (libem.a) that the test applications link against.
+
+- Building the example applications: 'make' builds all examples in the directory instead of just one.
+  Use 'make clean' to clean the test applications/examples, 'make real_clean' for a more thorough cleanup
+  and 'make em_clean' for a cleanup of the EM-library.
+  'make real_clean && make em_clean' would clean everything.
+
+- main() moved from EM into the application.
+
+- Command-line arg parsing should be handled by the application for both EM and application.
+  Note that DPDK requires some CL args and it parses them at startup, see rte_eal_init(argc, argv) - the rest
+  of the arguments, if any, should be parsed by the application. See the examples for details.
+
+- The Event Machine config is set by filling an em_conf_t struct and calling em_init(&em_conf) at startup.
+  The contents of em_conf_t is environment specific and can be extented/modified as needed.
+  Note: em_config_t.em_instance_id is added for future use - Currently only one (1) running instance of EM is supported.
+  
+- Startup and initialization sequence changed:
+    - main in application: initializes the HW-specific environment (DPDK - rte_eal_init()), initializes EM (em_init())
+      and launches the application main-loop on each EM-core. The application is responsible for creating the 
+      needed processes or threads for each EM-core to use. Note that the DPDK rte_eal_init() does this for you 
+      in the Intel case.
+    - The application main-loop on each EM-core must call em_init_core() before using any further EM-API calls.
+      An EM-core is ready to start creating EOs & queues, sending events etc. once the call to em_init_core()
+      has returned successfully.
+    - The application is responsible of calling em_dispatch() in its main-loop to (schedule and) dispatch 
+      EM events for processing. This provides more flexibility, as some applications might decide to perform
+      tasks outside of EM once returning from em_dispatch() and then at a later time enter EM again by
+      another em_dispatch() call. Calling em_dispatch(0 /*rounds=FOREVER*/) with argument 'rounds=0' will never return,
+      thus dispatching events until program execution is halted (this is the normal behaviour). On the other hand,
+      using a >=1 value for 'rounds' can be useful to perform some actions outside of EM every once in a while:
+          /* Application main-loop on each EM-core */
+          for(;;)
+          {
+            em_dispatch(1000); // Perform 1000 EM dispatch rounds before returning
+            
+            do_something_else(); // Perform some non-EM work.
+          }
+
+- Summary: New functions: em_init(), em_init_core(), em_dispatch() - in event_machine_hw_specific.h
+  (and event_machine_hw_specific.h.template)
+  NOTE! These functions were not added to the "official" EM-API (event_machine.h remains unchanged),
+  instead a HW specific file (and .template) was updated. The startup and initialization needs can 
+  vary greatly between systems and environments, thus it's better to allow some freedom in this area.
+  Example of the usage of these functions along with the changed initialization can be studied in the
+  event_test/example and event_test/packet_io directories.
+
+
+Open Event Machine 1.0:
 - Created.
 
 ====================================================================================================
@@ -261,7 +461,7 @@ Changes to Open Event Machine 1.0:
   dequeue-bursts into consideration.
 
 ====================================================================================================
-8. Timers
+8. Timers - event based notification
 ====================================================================================================
 Note: The event_timer is not a part of OpenEM. The current timer API, functionality and implementation
       may change later on. The Intel version is an experimental feature.
@@ -277,8 +477,7 @@ given queue:
     queue   - destination queue into which 'event' is sent
     cancel  - timeout cancel handle
   
-Include the em_timer.mk file in your application Makefile to enable the event timer:
-include $(EVENT_TIMER_DIR)/intel/em_timer.mk
+Enable the Event Timer by setting: em_conf.evt_timer = 1 before calling em_init(&em_conf).
 
 OpenEM sets up the event timer (if used) at startup and calls manage() during runtime. The application
 can immediately start using timeouts through the API calls evt_request_timeout(), evt_cancel_timeout() etc.

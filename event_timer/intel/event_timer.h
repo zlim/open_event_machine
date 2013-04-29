@@ -303,7 +303,7 @@ evt_timer_t evt_cancel_timeout(evt_timer_t handle, evt_cancel_t* cancel);
 
 
 
-inline void
+static inline void
 evt_timer_manage(void)
 {
 #if 1

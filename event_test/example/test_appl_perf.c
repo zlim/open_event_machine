@@ -42,6 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "example.h"
 
 
 
@@ -136,7 +137,6 @@ COMPILE_TIME_ASSERT((sizeof(core_stat)   %  ENV_CACHE_LINE_SIZE) == 0, CORE_STAT
 
 
 
-
 /**
  * Performance test EO context
  */
@@ -147,6 +147,7 @@ typedef struct
   
   /** Next sequence number (used with CHECK_SEQ_PER_EVENT) */
   int next_seq;
+  
 }eo_context_t;
 
 
@@ -170,8 +171,6 @@ ENV_SHARED static  eo_context_array_elem_t  perf_eo_context[NUM_EO];
 
 
 
-
-
 /**
  * Performance test event
  */
@@ -189,13 +188,154 @@ typedef struct
 } perf_event_t;
 
 
+
 /* 
  * Local function prototypes
  */
+static em_status_t
+perf_start(void* eo_context, em_eo_t eo);
+
+static em_status_t
+perf_stop(void* eo_context, em_eo_t eo);
+
+static void
+perf_receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx);
+
+static void
+perf_receive_b(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx);
+ 
 static void
 print_result(perf_stat_t *const perf_stat);
 
 
+
+/**
+ * Init and startup of the Perf Test test application.
+ *
+ * @see main() and example_start() for setup and dispatch.
+ */
+void
+test_init(example_conf_t *const example_conf)
+{
+  em_eo_t          eo;
+  eo_context_t*    eo_ctx;
+  em_queue_t       queue_a, queue_b;
+  em_event_t       event;
+  perf_event_t*    perf;
+  em_status_t      ret;
+  int              i, j;
+  
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+  
+
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         example_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         example_conf->num_procs,
+         example_conf->num_threads);
+         
+           
+  (void) memset(core_stat, 0, sizeof(core_stat));
+
+  /*
+   * Create and start application pairs
+   * Send initial test events to the queues
+   */
+  for(i = 0; i < (NUM_EO/2); i++)
+  {
+    /*
+     * Create EO "A"
+     */
+    eo_ctx = &perf_eo_context[2*i].eo_ctx;
+
+    eo      = em_eo_create("appl a", perf_start, NULL, perf_stop, NULL, perf_receive_a, eo_ctx);
+    queue_a = em_queue_create("queue A", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+
+    eo_ctx->next_seq = 0;
+
+    ret = em_eo_add_queue(eo, queue_a);
+    IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
+
+    ret = em_eo_start(eo, NULL, 0, NULL);
+    IS_ERROR(ret != EM_OK, "EO start failed (%u). EO: %"PRI_EO"\n", ret, eo);
+
+    ret = em_queue_enable(queue_a);
+    IS_ERROR(ret != EM_OK, "Queue A enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
+
+
+    /*
+     * Create EO "B"
+     */
+    eo_ctx = &perf_eo_context[2*i + 1].eo_ctx;
+
+    eo      = em_eo_create("appl b", perf_start, NULL, perf_stop, NULL, perf_receive_b, eo_ctx);
+    queue_b = em_queue_create("queue B", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+
+    eo_ctx->next_seq = NUM_EVENT/2;
+
+    ret = em_eo_add_queue(eo, queue_b);
+    IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
+
+    ret = em_eo_start(eo, NULL, 0, NULL);
+    IS_ERROR(ret != EM_OK, "EO start failed (%i). EO: %"PRI_EO"\n", ret, eo);
+    
+    ret = em_queue_enable(queue_b);                                                                              
+    IS_ERROR(ret != EM_OK, "Queue B enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
+    
+    
+    /*
+     * Alloc and send test events
+     */
+    for(j = 0; j < NUM_EVENT; j++)
+    {
+      em_queue_t first_q;
+      
+      event = em_alloc(sizeof(perf_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
+      IS_ERROR(event == EM_EVENT_UNDEF, "Event allocation failed (%i, %i)\n", i, j);
+      
+      perf = em_event_pointer(event);
+
+      
+      if(j & 0x1) 
+      {
+        // Odd: j = 1, 3, 5, ...
+        perf->seq  = NUM_EVENT/2 + j/2;  // 4, 5, 6, 7, ...  (NUM_EVENT/2 ... NUM_EVENT - 1)
+        first_q    = queue_b;
+        perf->dest = queue_a;
+      }
+      else
+      {
+        // Even: j = 0, 2, 4, ...
+        perf->seq  = j/2;                // 0, 1, 2, 3, ...  (0 ... NUM_EVENT/2 - 1)   
+        first_q    = queue_a;
+        perf->dest = queue_b;
+      }
+
+
+      ret = em_send(event, first_q);
+      IS_ERROR(ret != EM_OK, "Event send failed (%u)! Queue: %"PRI_QUEUE" \n", ret, first_q);
+    }
+
+  }
+  
+
+  env_sync_mem();
+}
 
 
 
@@ -206,7 +346,7 @@ print_result(perf_stat_t *const perf_stat);
  *
  */
 static em_status_t
-start(void* eo_context, em_eo_t eo)
+perf_start(void* eo_context, em_eo_t eo)
 {
   eo_context_t* eo_ctx = eo_context;
   
@@ -227,7 +367,7 @@ start(void* eo_context, em_eo_t eo)
  *
  */
 static em_status_t
-stop(void* eo_context, em_eo_t eo)
+perf_stop(void* eo_context, em_eo_t eo)
 {
   printf("EO %"PRI_EO" stopping.\n", eo);
 
@@ -245,7 +385,7 @@ stop(void* eo_context, em_eo_t eo)
  * Loops back events and calculates the event rate.
  */
 static void
-receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
+perf_receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
 {
   perf_event_t *perf;
   em_queue_t    dest_queue;
@@ -349,7 +489,7 @@ receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t q
  * Loops back events.
  */
 static void
-receive_b(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
+perf_receive_b(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
 {
   perf_event_t *perf;
   em_queue_t    dest_queue;
@@ -419,113 +559,6 @@ receive_b(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t q
 
   core_stat[core].events = events;
 }
-
-
-
-
-/**
- * Global init and startup of the performance test application.
- *
- */
-void
-test_appl_perf_start(void)
-{
-  em_eo_t          eo;
-  eo_context_t*    eo_ctx;
-  em_queue_t       queue_a, queue_b;
-  em_event_t       event;
-  perf_event_t*    perf;
-  em_status_t      ret;
-  int              i, j;
-  
-  
-  (void) memset(core_stat, 0, sizeof(core_stat));
-
-  /*
-   * Create and start application pairs
-   * Send initial test events to the queues
-   */
-  for(i = 0; i < (NUM_EO/2); i++)
-  {
-    /*
-     * Create EO "A"
-     */
-    eo_ctx = &perf_eo_context[2*i].eo_ctx;
-
-    eo      = em_eo_create("appl a", start, NULL, stop, NULL, receive_a, eo_ctx);
-    queue_a = em_queue_create("queue A", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-
-    eo_ctx->next_seq = 0;
-
-    ret = em_eo_add_queue(eo, queue_a);
-    IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-
-    ret = em_eo_start(eo, NULL, 0, NULL);
-    IS_ERROR(ret != EM_OK, "EO start failed (%u). EO: %"PRI_EO"\n", ret, eo);
-
-    ret = em_queue_enable(queue_a);
-    IS_ERROR(ret != EM_OK, "Queue A enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-
-
-    /*
-     * Create EO "B"
-     */
-    eo_ctx = &perf_eo_context[2*i + 1].eo_ctx;
-
-    eo      = em_eo_create("appl b", start, NULL, stop, NULL, receive_b, eo_ctx);
-    queue_b = em_queue_create("queue B", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-
-    eo_ctx->next_seq = NUM_EVENT/2;
-
-    ret = em_eo_add_queue(eo, queue_b);
-    IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-
-    ret = em_eo_start(eo, NULL, 0, NULL);
-    IS_ERROR(ret != EM_OK, "EO start failed (%i). EO: %"PRI_EO"\n", ret, eo);
-    
-    ret = em_queue_enable(queue_b);                                                                              
-    IS_ERROR(ret != EM_OK, "Queue B enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-    
-    
-    /*
-     * Alloc and send test events
-     */
-    for(j = 0; j < NUM_EVENT; j++)
-    {
-      em_queue_t first_q;
-      
-      event = em_alloc(sizeof(perf_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
-      IS_ERROR(event == EM_EVENT_UNDEF, "Event allocation failed (%i, %i)\n", i, j);
-      
-      perf = em_event_pointer(event);
-
-      
-      if(j & 0x1) 
-      {
-        // Odd: j = 1, 3, 5, ...
-        perf->seq  = NUM_EVENT/2 + j/2;  // 4, 5, 6, 7, ...  (NUM_EVENT/2 ... NUM_EVENT - 1)
-        first_q    = queue_b;
-        perf->dest = queue_a;
-      }
-      else
-      {
-        // Even: j = 0, 2, 4, ...
-        perf->seq  = j/2;                // 0, 1, 2, 3, ...  (0 ... NUM_EVENT/2 - 1)   
-        first_q    = queue_a;
-        perf->dest = queue_b;
-      }
-
-
-      ret = em_send(event, first_q);
-      IS_ERROR(ret != EM_OK, "Event send failed (%u)! Queue: %"PRI_QUEUE" \n", ret, first_q);
-    }
-
-  }
-  
-
-  env_sync_mem();
-}
-
 
 
 

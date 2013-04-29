@@ -50,27 +50,33 @@ extern "C" {
  */
 typedef void* em_event_t;
 
-
 /** Undefined event */
 #define EM_EVENT_UNDEF (NULL)
 
 
+
 /**
- * Get pointer to event structure
- *
- * Returns pointer to the event structure or NULL. Event structure is
- * implementation and event type specific. It may be a directly 
- * accessible buffer of memory, a descriptor containing a list of 
- * buffer pointers, a descriptor of a packet buffer, etc.
- *
- * @param event   Event from receive/alloc
- *
- * @return Event pointer or NULL
+ * Event Machine run-time configuration options given at startup to em_init()
+ * 
+ * Content is copied into EM.
+ * 
+ * @note Several EM options are configured through compile-time defines.
+ *       Run-time options allow using the same EM-lib with different configs.
+ * 
+ * @see em_init()
  */
-static inline void* em_event_pointer(em_event_t event)
+typedef struct
 {
-  return event;
-}
+ 
+  int em_instance_id; /**< Event Machine Instance Id */
+  
+  int pkt_io;         /**< Packet I/O: enable=1, disable=0 */
+  
+  int evt_timer;      /**< Event Timer: enable=1, disable=0 */
+  
+  /* Add further as needed. */
+   
+} em_conf_t;
 
 
 

@@ -44,6 +44,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "example.h"
+
 
 
 #define SPIN_COUNT   50000000
@@ -103,8 +105,110 @@ ENV_SHARED static em_queue_t queue_a = EM_QUEUE_UNDEF;
 /* 
  * Local function prototypes
  */
+static em_status_t
+hello_start(my_eo_context_t* eo_ctx, em_eo_t eo);
+
+static em_status_t
+hello_stop(my_eo_context_t* eo_ctx, em_eo_t eo);
+
+static void
+hello_receive_event(my_eo_context_t* eo_ctx, em_event_t event, em_event_type_t type, em_queue_t queue, my_queue_context_t* q_ctx);
+ 
 static void
 delay_spin(my_eo_context_t* eo_ctx);
+
+
+
+/**
+ * Init and startup of the Hello World test application.
+ *
+ * @see main() and example_start() for setup and dispatch.
+ */
+void
+test_init(example_conf_t *const example_conf)
+{
+  em_eo_t        eo_a, eo_b;
+  
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+  
+  
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         example_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         example_conf->num_procs,
+         example_conf->num_threads);
+  
+  
+
+  memset(&eo_context_a, 0, sizeof(my_eo_context_t));
+  memset(&eo_context_b, 0, sizeof(my_eo_context_t));
+
+  memset(&queue_context_a, 0, sizeof(my_queue_context_t));
+  memset(&queue_context_b, 0, sizeof(my_queue_context_t));
+
+
+  //
+  // Create both EOs
+  //
+  eo_a = em_eo_create("EO A",
+                      (em_start_func_t)  hello_start, NULL,
+                      (em_stop_func_t)   hello_stop,  NULL, 
+                      (em_receive_func_t)hello_receive_event, 
+                      &eo_context_a
+                     );
+                     
+  if(eo_a == EM_EO_UNDEF)
+  {
+    printf("EO A creation failed! \n");
+    return;
+  }
+
+
+  eo_b = em_eo_create("EO B",
+                      (em_start_func_t)  hello_start, NULL,
+                      (em_stop_func_t)   hello_stop,  NULL, 
+                      (em_receive_func_t)hello_receive_event, 
+                      &eo_context_b
+                     );
+  
+  if(eo_b == EM_EO_UNDEF)
+  {
+    printf("EO B creation failed! \n");
+    return;
+  }
+
+
+  // Init EO contexts
+  eo_context_a.this_eo  = eo_a;
+  eo_context_a.other_eo = eo_b;
+  eo_context_a.is_a     = 1;
+
+  eo_context_b.this_eo  = eo_b;
+  eo_context_b.other_eo = eo_a;
+  eo_context_b.is_a     = 0;
+
+  // Start EO A
+  em_eo_start(eo_a, NULL, 0, NULL);
+
+  // Start EO B
+  em_eo_start(eo_b, NULL, 0, NULL);
+ 
+}
 
 
 
@@ -273,60 +377,6 @@ hello_receive_event(my_eo_context_t* eo_ctx, em_event_t event, em_event_type_t t
 
 }
 
-
-
-
-/**
- * Global init and startup of the hello world test application.
- */
-void
-test_appl_hello_start(void)
-{
-  em_eo_t        eo_a, eo_b;
-
-  memset(&eo_context_a, 0, sizeof(my_eo_context_t));
-  memset(&eo_context_b, 0, sizeof(my_eo_context_t));
-
-  memset(&queue_context_a, 0, sizeof(my_queue_context_t));
-  memset(&queue_context_b, 0, sizeof(my_queue_context_t));
-
-
-  //
-  // Create both EOs
-  //
-  eo_a = em_eo_create("EO A", (em_start_func_t)hello_start, NULL, (em_stop_func_t)hello_stop, NULL, (em_receive_func_t)hello_receive_event, &eo_context_a);
-
-  if(eo_a == EM_EO_UNDEF)
-  {
-    printf("EO A creation failed! \n");
-    return;
-  }
-
-  eo_b = em_eo_create("EO B", (em_start_func_t)hello_start, NULL, (em_stop_func_t)hello_stop, NULL, (em_receive_func_t)hello_receive_event, &eo_context_b);
-  
-  if(eo_b == EM_EO_UNDEF)
-  {
-    printf("EO B creation failed! \n");
-    return;
-  }
-
-  // Init EO contexts
-  eo_context_a.this_eo  = eo_a;
-  eo_context_a.other_eo = eo_b;
-  eo_context_a.is_a     = 1;
-
-  eo_context_b.this_eo  = eo_b;
-  eo_context_b.other_eo = eo_a;
-  eo_context_b.is_a     = 0;
-
-  // Start EO A
-  em_eo_start(eo_a, NULL, 0, NULL);
-
-  // Start EO B
-  em_eo_start(eo_b, NULL, 0, NULL);
-
-  
-}
 
 
 

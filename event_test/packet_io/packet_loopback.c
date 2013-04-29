@@ -44,9 +44,11 @@
 // Generic HW abstraction
 #include "environment.h"
 
-// Packet IO HW abstraction for test applications
+// Packet IO HW abstraction
 #include "packet_io_hw.h"
 
+// Application config params and function prototypes
+#include "packet_io.h"
 
 
 
@@ -227,12 +229,8 @@ ENV_SHARED static  queue_context_t  EO_q_ctx[NUM_QUEUES]  ENV_CACHE_LINE_ALIGNED
 
 
 /**
- * Function Prototypes
- */ 
-
-void
-packet_loopback_start(void);
-
+ * Local Function Prototypes
+ */
 static em_status_t
 start(void *eo_ctx, em_eo_t eo);
 
@@ -245,10 +243,10 @@ receive_packet(void *eo_ctx, em_event_t event, em_event_type_t type, em_queue_t 
 static em_status_t
 stop(void *eo_ctx, em_eo_t eo);
 
-
+#if ENABLE_ERROR_CHECKS == 1
 inline static int
 rx_error_check(void *eo_ctx, em_event_t event, em_queue_t queue, void *q_ctx);
-            
+#endif
 
 #if ALLOC_COPY_FREE == 1
 static em_event_t
@@ -262,19 +260,41 @@ ipaddr_tostr(uint32_t ip_addr, char *const ip_addr_str__out);
 
 
 
-
 /**
- * Application creation & start up 
- * 
- * Create the application EO and start it on all cores.
+ * Init and startup of the Packet Loopback test application.
+ *
+ * @see main() and packet_io_start() for setup and dispatch.
  */
 void
-packet_loopback_start(void)
+test_init(packet_io_conf_t *const packet_io_conf)
 {
   em_eo_t       eo;
   eo_context_t *app_eo_ctx;
   
-  printf("%s()\n", __func__);
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+  
+
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         packet_io_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         packet_io_conf->num_procs,
+         packet_io_conf->num_threads);
+         
 
   //
   // Create EO

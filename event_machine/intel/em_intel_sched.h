@@ -199,9 +199,6 @@ typedef union
 /*
  * Externs
  */
-extern ENV_SHARED  core_sched_masks_t       core_sched_masks[MAX_CORES];
-extern ENV_SHARED  core_sched_add_counts_t  core_sched_add_counts[MAX_CORES];
-extern ENV_SHARED  sched_add_counts_lock_t  sched_add_counts_lock;
 
 
 
@@ -246,8 +243,11 @@ sched_masks_rem_queue_group__local(const em_queue_group_t grp);
 void
 sched_masks_add_queue_group__local(const em_queue_group_t grp);
 
+void
+sched_init_global_1(void);
+
 em_status_t
-sched_init_global(void);
+sched_init_global_2(void);
 
 void
 sched_init_local(void);

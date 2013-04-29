@@ -39,6 +39,7 @@ extern "C" {
 
 #include <sys/queue.h>
 
+#include <rte_config.h>
 #include <rte_memory.h>
 #include <rte_memzone.h>
 #include <rte_launch.h>
@@ -359,6 +360,7 @@ static inline void env_barrier_sync(env_barrier_t* barrier)
 
 typedef rte_spinlock_recursive_t env_spinlock_t;
 
+#define ENV_SPINLOCK_INITIALIZER RTE_SPINLOCK_RECURSIVE_INITIALIZER
 
 static inline void
 env_spinlock_init(env_spinlock_t *const lock)
@@ -401,6 +403,7 @@ env_spinlock_unlock(env_spinlock_t *const lock)
 
 typedef rte_spinlock_t env_spinlock_t;
 
+#define ENV_SPINLOCK_INITIALIZER RTE_SPINLOCK_INITIALIZER
 
 static inline void
 env_spinlock_init(env_spinlock_t *const lock)

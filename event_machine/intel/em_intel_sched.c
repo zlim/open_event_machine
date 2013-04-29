@@ -44,9 +44,13 @@
 #include "em_intel_sched.h"
 #include "em_intel_event_group.h"
 #include "em_intel_queue_group.h"
-#include "em_intel_packet.h"
 #include "em_internal_event.h"
 #include "em_error.h"
+
+
+#ifdef EVENT_PACKET
+  #include "em_intel_packet.h"
+#endif
 
 #include "intel_hw_init.h"
 #include "intel_alloc.h"
@@ -143,7 +147,7 @@ typedef struct
 /**
  * All scheduling queues
  */
-ENV_SHARED  sched_qs_t  sched_qs_prio  ENV_CACHE_LINE_ALIGNED;
+static ENV_SHARED  sched_qs_t  sched_qs_prio  ENV_CACHE_LINE_ALIGNED;
 
 COMPILE_TIME_ASSERT((sizeof(sched_qs_prio) % ENV_CACHE_LINE_SIZE) == 0, SCHED_QS_PRIO_SIZE_ERROR);
 
@@ -153,9 +157,9 @@ COMPILE_TIME_ASSERT((sizeof(sched_qs_prio) % ENV_CACHE_LINE_SIZE) == 0, SCHED_QS
 /**
  * The cores' queue group masks used in scheduling, cores accesses array based on EM core ID (reads). Updates can be done by any core
  */
-ENV_SHARED  core_sched_masks_t       core_sched_masks[MAX_CORES]      ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  core_sched_add_counts_t  core_sched_add_counts[MAX_CORES] ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  sched_add_counts_lock_t  sched_add_counts_lock            ENV_CACHE_LINE_ALIGNED;
+static ENV_SHARED  core_sched_masks_t       core_sched_masks[MAX_CORES]      ENV_CACHE_LINE_ALIGNED;
+static ENV_SHARED  core_sched_add_counts_t  core_sched_add_counts[MAX_CORES] ENV_CACHE_LINE_ALIGNED;
+static ENV_SHARED  sched_add_counts_lock_t  sched_add_counts_lock            ENV_CACHE_LINE_ALIGNED;
 
 COMPILE_TIME_ASSERT((sizeof(core_sched_masks_t)     % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_MASKS_T_SIZE_ERROR);
 COMPILE_TIME_ASSERT((sizeof(core_sched_masks)       % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_MASKS_ARR_SIZE_ERROR);
@@ -166,13 +170,13 @@ COMPILE_TIME_ASSERT((sizeof(core_sched_add_counts)  % ENV_CACHE_LINE_SIZE) == 0,
  * Bulk dequeue buffers used in the schedule_...() functions.
  */
  
-// Multi-Ring, max counts means 0 TO MAX will be dequeued
-#define MAX_Q_BULK_ATOMIC        (16) // Max nbr of q_elems to bulk dequeue
+// Multi-Ring
+#define MAX_Q_BULK_ATOMIC        (8)  // Max nbr of q_elems to bulk dequeue
 #define MAX_E_BULK_PARALLEL      (16) // Max nbr of event-hdrs to bulk dequeue
 #define MAX_E_BULK_PARALLEL_ORD  (16) // Max nbr of event-hdrs to bulk dequeue
 
-// RTE-Ring, max means that 0 OR MAX will be dequeued (note difference cmp to multiring)
-#define MAX_E_BULK_ATOMIC        (8)  // Max nbr of events  to bulk dequeue
+// RTE-Ring
+#define MAX_E_BULK_ATOMIC        (16)  // Max nbr of events  to bulk dequeue
 
 #define BULK_DEQUEUE_BUF1_SIZE   (MAX_Q_BULK_ATOMIC)
 #define BULK_DEQUEUE_BUF2_SIZE   (MAX_E_BULK_ATOMIC)
@@ -196,7 +200,7 @@ typedef union
 /**
  * Bulk dequeue buffers
  */
-ENV_LOCAL  bulk_dequeue_bufs_t  bulk_dequeue_bufs  ENV_CACHE_LINE_ALIGNED;
+static ENV_LOCAL  bulk_dequeue_bufs_t  bulk_dequeue_bufs  ENV_CACHE_LINE_ALIGNED;
 
 COMPILE_TIME_ASSERT((sizeof(bulk_dequeue_bufs) % ENV_CACHE_LINE_SIZE) == 0, BULK_DEQUEUE_BUFS_SIZE_ERROR);
 
@@ -221,7 +225,7 @@ typedef union
 } sched_core_local_t;
 
 
-ENV_LOCAL  sched_core_local_t  sched_core_local  ENV_CACHE_LINE_ALIGNED;
+static ENV_LOCAL  sched_core_local_t  sched_core_local  ENV_CACHE_LINE_ALIGNED;
 
 COMPILE_TIME_ASSERT((sizeof(sched_core_local) % ENV_CACHE_LINE_SIZE) == 0, EM_SCHED_CORE_LOCAL_SIZE_ERROR);
 
@@ -268,9 +272,9 @@ em_send_parallel_ordered(em_event_hdr_t *const ev_hdr, em_queue_element_t *const
 
 
 static inline void
-em_dispatch(em_queue_element_t *const q_elem,
-            em_event_t                event,
-            const em_event_type_t     event_type);
+dispatch_event(em_queue_element_t *const q_elem,
+               em_event_t                event,
+               const em_event_type_t     event_type);
 
 
 #if RX_DIRECT_DISPATCH == 1
@@ -304,10 +308,58 @@ sched_q_get_next_qidx(const uint16_t curr_idx, const uint16_t mask);
 
 
 /**
+ * EM event dispatch.
+ * 
+ * Called by each EM-core to dispatch events for EM processing.
+ *
+ * @param rounds  Dispatch rounds before returning, 0 means 'never return from dispatch'
+ */
+void
+em_dispatch(uint32_t rounds)
+{
+  uint32_t i;
+  
+  
+  IF_LIKELY(rounds > 0)
+  {
+    for(i = 0; i < rounds; i++)
+    {
+      /*
+       * Schedule events to the core from queues
+       */
+      em_schedule();
+    }
+  }
+  else // rounds == 0 (== FOREVER)
+  {
+    for(;/*ever*/;)
+    {
+      em_schedule();
+    }
+  }
+  
+  return;
+}
+
+
+
+/**
  * Global init of the scheduling queues
  */
+void
+sched_init_global_1(void) 
+{
+  (void) memset(&sched_qs_prio,         0, sizeof(sched_qs_prio));
+  (void) memset( core_sched_masks,      0, sizeof(core_sched_masks));     
+  (void) memset( core_sched_add_counts, 0, sizeof(core_sched_add_counts));
+  
+  env_spinlock_init(&sched_add_counts_lock.lock);
+}
+
+
+
 em_status_t
-sched_init_global(void)
+sched_init_global_2(void)
 {
   char     sched_q_name[32];
   int      num_cores;
@@ -474,55 +526,63 @@ em_schedule(void)
   int events_dispatched;
   
   
-  for(;/* ever */;)
+  #ifdef EVENT_PACKET
+  if(em_internal_conf.conf.pkt_io)
   {
-    #ifdef EVENT_PACKET
     /*
      * Poll for Eth frames and enqueue.
      */
     em_eth_rx_packets();
-    #endif
-    
+  }
+  #endif
+  
 
-    do {
-      #ifdef EVENT_TIMER
-      /* 
+  do {
+    
+    #ifdef EVENT_TIMER
+    if(em_internal_conf.conf.evt_timer)
+    {
+      /*
        * Manage the event timer.
        */
       evt_timer_manage();
-      #endif
-      
-      
-      /*
-       * Schedule & dispatch.
-       */
-      events_dispatched = em_schedule_queues();
+    }
+    #endif
+    
+    
+    /*
+     * Schedule & dispatch.
+     */
+    events_dispatched = em_schedule_queues();
 
 
-      #ifdef EVENT_PACKET
+    #ifdef EVENT_PACKET
+    if(em_internal_conf.conf.pkt_io)
+    {
       /*
        * Transmit Eth frames that have been in the output buffers for "too long".
        */
       em_eth_tx_packets_timed();
-      #endif        
-      
-      
-      /* 
-       * Approximate for the need for additional schduling rounds before new Eth-Rx events.
-       * Note: the approx is core-local and does not take into account what the other cores do.
-       */
-      if(events_dispatched == 0) {
-        break;
-      }
-      else {
-        sched_core_local.events_enqueued -= events_dispatched;
-      }
-      
-    } while(sched_core_local.events_enqueued > 0);
+    }
+    #endif        
     
-    /* Reset count for the next round */
-    sched_core_local.events_enqueued = 0;
-  }
+    
+    /* 
+     * Approximate for the need for additional schduling rounds before new Eth-Rx events.
+     * Note: the approx is core-local and does not take into account what the other cores do.
+     */
+    if(events_dispatched == 0) {
+      break;
+    }
+    else {
+      sched_core_local.events_enqueued -= events_dispatched;
+    }
+    
+  } while(sched_core_local.events_enqueued > 0);
+  
+  
+  /* Reset count for the next round */
+  sched_core_local.events_enqueued = 0;
 }
 
 
@@ -659,12 +719,13 @@ em_schedule_atomic(sched_q_atomic_t              sched_q_atomic[],
         for(i = 0; i < e_count; i++)
         {
           em_event_t            event  = e_ptr[i];
+          ENV_PREFETCH(event);
           em_event_hdr_t *const ev_hdr = event_to_event_hdr(event);
 
           // Mark that this event was received from an atomic queue
           ev_hdr->src_q_type = EM_QUEUE_TYPE_ATOMIC;
 
-          em_dispatch(q_elem, event, ev_hdr->event_type);
+          dispatch_event(q_elem, event, ev_hdr->event_type);
         }
         
         events_dispatched += e_count;
@@ -840,7 +901,7 @@ em_schedule_parallel(sched_q_parallel_t           sched_q_parallel[],
 
       ev_hdr->src_q_type = EM_QUEUE_TYPE_PARALLEL;
 
-      em_dispatch(q_elem, event, ev_hdr->event_type);
+      dispatch_event(q_elem, event, ev_hdr->event_type);
     }
 
     events_dispatched += ev_hdr_count;
@@ -1020,7 +1081,7 @@ em_schedule_parallel_ordered(sched_q_parallel_ord_t       sched_q_parallel_ord[]
       // PREFETCH_Q_ELEM(q_elem);
       em_event_t                event  = event_hdr_to_event(ev_hdr);
 
-      em_dispatch(q_elem, event, ev_hdr->event_type);
+      dispatch_event(q_elem, event, ev_hdr->event_type);
     }
 
     events_dispatched += ev_hdr_count;
@@ -1176,6 +1237,10 @@ sched_masks_add_queue(const em_queue_t       queue,
                   "em_queue_group_mask(group=%"PRI_QGRP", core_mask=%"PRIX64") returns %u",
                    group, core_mask.u64, err);
 
+
+  RETURN_ERROR_IF(em_core_mask_iszero(&core_mask), EM_FATAL(EM_ERR_BAD_ID), EM_ESCOPE_SCHED_MASKS_ADD,
+                  "em_queue_group_mask(group=%"PRI_QGRP", core_mask=%"PRIX64") is zero!",
+                   group, core_mask.u64);
 
   core_count = em_core_count();
 
@@ -2100,9 +2165,9 @@ em_atomic_processing_end(void)
  *  This is the EM dispatcher.
  */
 static inline void
-em_dispatch(em_queue_element_t *const q_elem,
-            em_event_t                event,
-            const em_event_type_t     event_type)
+dispatch_event(em_queue_element_t *const q_elem,
+               em_event_t                event,
+               const em_event_type_t     event_type)
 {
   em_queue_t           queue;
   em_event_hdr_t      *event_hdr;
@@ -2212,7 +2277,7 @@ em_direct_dispatch(em_event_t                event,
 
       case EM_QUEUE_TYPE_PARALLEL:
         ev_hdr->q_elem = q_elem;
-        em_dispatch(q_elem, event, EM_EVENT_TYPE_PACKET);
+        dispatch_event(q_elem, event, EM_EVENT_TYPE_PACKET);
         break;
 
       case EM_QUEUE_TYPE_PARALLEL_ORDERED:
@@ -2271,7 +2336,7 @@ em_direct_dispatch__atomic(em_queue_element_t *const q_elem,
   ev_hdr->q_elem     = q_elem;
   ev_hdr->src_q_type = EM_QUEUE_TYPE_ATOMIC;
 
-  em_dispatch(q_elem, event, EM_EVENT_TYPE_PACKET);
+  dispatch_event(q_elem, event, EM_EVENT_TYPE_PACKET);
 
   ret = 1;
   
@@ -2338,7 +2403,7 @@ em_direct_dispatch__atomic(em_queue_element_t *const q_elem,
           //
           // Call dispatch with lock unlocked
           // 
-          em_dispatch(q_elem, event, EM_EVENT_TYPE_PACKET);
+          dispatch_event(q_elem, event, EM_EVENT_TYPE_PACKET);
           
           
           ENV_PREFETCH(&q_elem->lock);
@@ -2416,7 +2481,7 @@ em_direct_dispatch__parallel_ordered(em_queue_element_t *const q_elem,
 
   IF_LIKELY(status == EM_OK)
   {
-    em_dispatch(q_elem, event, EM_EVENT_TYPE_PACKET);
+    dispatch_event(q_elem, event, EM_EVENT_TYPE_PACKET);
   }
   else
   {

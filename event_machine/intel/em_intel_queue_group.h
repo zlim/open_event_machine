@@ -163,6 +163,22 @@ group_mask_clr(volatile uint64_t *const group_mask, const em_queue_group_t queue
 
 
 
+static inline int 
+group_mask_cnt(volatile uint64_t *const group_mask)
+{
+  uint64_t n = *group_mask;
+  int      cnt;
+  
+
+  for(cnt = 0; n; cnt++)
+  {
+    n &= (n - 1); // Clear the least significant bit set
+  }
+  
+  return cnt;
+}
+
+
 
 /**
  * Modify the EM_QUEUE_GROUP_CORE_LOCAL_BASE_NAME ("core00") for a core

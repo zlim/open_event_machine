@@ -55,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "example.h"
 
 
 /*
@@ -137,11 +138,173 @@ ENV_SHARED static em_queue_t queue_a, queue_b, queue_c;
  * Local function prototypes
  */
 static em_status_t
+error_start(void* eo_context, em_eo_t eo);
+
+static em_status_t
+error_stop(void* eo_context, em_eo_t eo);
+
+static void
+error_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx);
+
+static em_status_t
+global_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_list args);
+
+static em_status_t
+eo_specific_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_list args);
+
+static em_status_t
 combined_error_handler(const char* handler_name, em_eo_t eo, em_status_t error, em_escope_t escope, va_list args); 
  
 static void
 delay_spin(eo_context_t* eo_ctx);
 
+
+
+/**
+ * Init and startup of the Error Handler test application.
+ *
+ * @see main() and example_start() for setup and dispatch.
+ */
+void
+test_init(example_conf_t *const example_conf)
+{
+  em_eo_t        eo;
+  em_event_t     event;
+  error_event_t* error;
+  em_status_t    ret;  
+
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+
+
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         example_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         example_conf->num_procs,
+         example_conf->num_threads);
+         
+  
+  /* 
+   * Register the application specifig global error handler
+   * This replaces the EM internal default error hanlder
+   */
+  em_register_error_handler(global_error_handler); 
+
+
+  /*
+   * Create and start EO "A"
+   */
+  eo      = em_eo_create("EO A", error_start, NULL, error_stop, NULL, error_receive, &eo_error_a.eo_ctx);
+  queue_a = em_queue_create("queue A", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+  
+  if((ret = em_eo_add_queue(eo, queue_a)) != EM_OK)
+  {
+    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
+    return;
+  }
+
+  if((ret = em_queue_enable(queue_a)) != EM_OK)
+  {
+    printf("Queue A enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
+    return;
+  }
+
+  /*
+   * Register an application 'EO A'-specific error handler
+   */
+  em_eo_register_error_handler(eo, eo_specific_error_handler); 
+  em_eo_start(eo, NULL, 0, NULL);
+
+
+  //
+  // Create and start EO "B"
+  //
+  eo      = em_eo_create("EO B", error_start, NULL, error_stop, NULL, error_receive, &eo_error_b.eo_ctx);
+  queue_b = em_queue_create("queue B", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+
+  if((ret = em_eo_add_queue(eo, queue_b)) != EM_OK)
+  {
+    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
+    return;
+  }
+  
+  if((ret = em_queue_enable(queue_b)) != EM_OK)
+  {
+    printf("Queue B enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
+    return;
+  }
+  
+  /* Note: No 'EO B' specific error handler, use the application specific global error handler instead. */
+  em_eo_start(eo, NULL, 0, NULL);
+
+
+  /*
+   * Create and start EO "C"
+   */
+  eo      = em_eo_create("EO C", error_start, NULL, error_stop, NULL, error_receive, &eo_error_c.eo_ctx);
+  queue_c = em_queue_create("queue C", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+
+  if((ret = em_eo_add_queue(eo, queue_c)) != EM_OK)
+  {
+    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
+    return;
+  }
+
+  if((ret = em_queue_enable(queue_c)) != EM_OK)
+  {
+    printf("Queue C enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
+    return;
+  }
+
+  /* Note: No 'EO C' specific error handler, use the application specific global error handler instead. */
+  em_eo_start(eo, NULL, 0, NULL);
+  
+  
+  
+  
+  /*
+   * Send an event to EO A.
+   * Store EO B's queue as the destination queue for EO A.
+   */
+  event = em_alloc(sizeof(error_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
+
+  error = em_event_pointer(event);
+
+  error->dest  = queue_b;
+  error->seq   = 0;
+  error->fatal = 0;
+
+  em_send(event, queue_a);
+
+
+  /*
+   * Send an event to EO C.
+   * No dest queue stored since the fatal flag is set
+   */
+  event = em_alloc(sizeof(error_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
+
+  error = em_event_pointer(event);
+
+  error->dest  = 0; // don't care, never resent
+  error->seq   = 0;
+  error->fatal = 1; // generate a fatal error when received
+
+  em_send(event, queue_c);
+}
 
 
 
@@ -377,131 +540,6 @@ error_stop(void* eo_context, em_eo_t eo)
 
   return EM_OK;
 }
-
-
-
-
-/**
- * Global init and startup of the error handler test application.
- *
- */
-void
-test_appl_error_start(void)
-{
-  em_eo_t        eo;
-  em_event_t     event;
-  error_event_t* error;
-  em_status_t    ret;
-
-
-  /* 
-   * Register the application specifig global error handler
-   * This replaces the EM internal default error hanlder
-   */
-  em_register_error_handler(global_error_handler); 
-
-
-  /*
-   * Create and start EO "A"
-   */
-  eo      = em_eo_create("EO A", error_start, NULL, error_stop, NULL, error_receive, &eo_error_a.eo_ctx);
-  queue_a = em_queue_create("queue A", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-  
-  if((ret = em_eo_add_queue(eo, queue_a)) != EM_OK)
-  {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-    return;
-  }
-
-  if((ret = em_queue_enable(queue_a)) != EM_OK)
-  {
-    printf("Queue A enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-    return;
-  }
-
-  /*
-   * Register an application 'EO A'-specific error handler
-   */
-  em_eo_register_error_handler(eo, eo_specific_error_handler); 
-  em_eo_start(eo, NULL, 0, NULL);
-
-
-  //
-  // Create and start EO "B"
-  //
-  eo      = em_eo_create("EO B", error_start, NULL, error_stop, NULL, error_receive, &eo_error_b.eo_ctx);
-  queue_b = em_queue_create("queue B", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-
-  if((ret = em_eo_add_queue(eo, queue_b)) != EM_OK)
-  {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-    return;
-  }
-  
-  if((ret = em_queue_enable(queue_b)) != EM_OK)
-  {
-    printf("Queue B enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-    return;
-  }
-  
-  /* Note: No 'EO B' specific error handler, use the application specific global error handler instead. */
-  em_eo_start(eo, NULL, 0, NULL);
-
-
-  /*
-   * Create and start EO "C"
-   */
-  eo      = em_eo_create("EO C", error_start, NULL, error_stop, NULL, error_receive, &eo_error_c.eo_ctx);
-  queue_c = em_queue_create("queue C", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-
-  if((ret = em_eo_add_queue(eo, queue_c)) != EM_OK)
-  {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
-    return;
-  }
-
-  if((ret = em_queue_enable(queue_c)) != EM_OK)
-  {
-    printf("Queue C enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
-    return;
-  }
-
-  /* Note: No 'EO C' specific error handler, use the application specific global error handler instead. */
-  em_eo_start(eo, NULL, 0, NULL);
-  
-  
-  
-  
-  /*
-   * Send an event to EO A.
-   * Store EO B's queue as the destination queue for EO A.
-   */
-  event = em_alloc(sizeof(error_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
-
-  error = em_event_pointer(event);
-
-  error->dest  = queue_b;
-  error->seq   = 0;
-  error->fatal = 0;
-
-  em_send(event, queue_a);
-
-
-  /*
-   * Send an event to EO C.
-   * No dest queue stored since the fatal flag is set
-   */
-  event = em_alloc(sizeof(error_event_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
-
-  error = em_event_pointer(event);
-
-  error->dest  = 0; // don't care, never resent
-  error->seq   = 0;
-  error->fatal = 1; // generate a fatal error when received
-
-  em_send(event, queue_c);
-}
-
 
 
 

@@ -36,8 +36,8 @@
 #
 CFLAGS += -I$(EVENT_MACHINE_DIR)
 CFLAGS += -I$(EVENT_MACHINE_DIR)/intel
-CFLAGS += -I$(PROJECT_ROOT)/misc/intel
-
+CFLAGS += -I$(PROJECT_ROOT)/misc       # misc_packet.h misc_list.h
+CFLAGS += -I$(PROJECT_ROOT)/misc/intel # environment.h
 
 
 #
@@ -51,9 +51,6 @@ CFLAGS += -DEM_64_BIT
 # Include packet IO
 #CFLAGS += -DEVENT_PACKET # Set, if needed, in higher level Makefile
 
-CFLAGS += -I$(EVENT_MACHINE_DIR)
-CFLAGS += -I$(PROJECT_ROOT)/misc       # misc_packet.h misc_list.h
-CFLAGS += -I$(PROJECT_ROOT)/misc/intel # environment.h
 
 
 #
@@ -61,7 +58,7 @@ CFLAGS += -I$(PROJECT_ROOT)/misc/intel # environment.h
 #
 
 # Event Machine
-EM_SRCS   = $(EVENT_MACHINE_DIR)/intel/em_main.c
+EM_SRCS   = $(EVENT_MACHINE_DIR)/intel/em_init.c
 EM_SRCS  += $(EVENT_MACHINE_DIR)/intel/em_intel.c
 EM_SRCS  += $(EVENT_MACHINE_DIR)/intel/em_intel_sched.c
 EM_SRCS  += $(EVENT_MACHINE_DIR)/intel/em_intel_event_group.c
@@ -75,14 +72,3 @@ EM_SRCS  += $(PROJECT_ROOT)/misc/intel/intel_hw_init.c
 EM_SRCS  += $(PROJECT_ROOT)/misc/intel/intel_environment.c
 
 
-
-# Object files
-EM_OBJS = $(foreach obj,$(notdir $(EM_SRCS:.c=.o)),$(OBJ_DIR)/$(obj))
-
-# Dependencies
-DEPS +=  $(EM_OBJS:.o=.d)
-
-
-# Export - Add to the 'all source files' variable
-ALL_SRCS += $(EM_SRCS)
-SRCS-y   += $(EM_SRCS)

@@ -35,14 +35,20 @@
  * sending the datagrams back out. Uses EM queues of different priority and type.
  */
 
-#include "event_machine.h"
-#include "environment.h"
-
 #include <string.h>
 #include <stdio.h>
 
+// Event Machine API
+#include "event_machine.h"
+
+// Generic HW abstraction
+#include "environment.h"
+
+// Packet IO HW abstraction
 #include "packet_io_hw.h"
 
+// Application config params and function prototypes
+#include "packet_io.h"
 
 
 
@@ -99,7 +105,6 @@
 
 /**
  * Enable per packet error checking
- * 
  */
 #define ENABLE_ERROR_CHECKS  0 // 0=False or 1=True
 
@@ -245,12 +250,8 @@ ENV_SHARED static  queue_type_tuple_t  q_type_permutations[QUEUE_TYPE_PERMUTATIO
 
 
 /**
- * Function Prototypes
+ * Local Function Prototypes
  */
- 
-void
-packet_multi_stage_start(void);
- 
 static em_status_t
 start(void* eo_context, em_eo_t eo);
 static em_status_t
@@ -268,9 +269,9 @@ stop(void* eo_context, em_eo_t eo);
 static em_status_t
 stop_local(void* eo_context, em_eo_t eo);
 
-//
-// Helpers:
-//
+/*
+ * Helpers:
+ */
 static void ipaddr_tostr(uint32_t ip_addr, char *const ip_addr_str__out);
 static queue_type_tuple_t* get_queue_type_tuple(int cnt);
 static void fill_q_type_permutations(void);
@@ -281,12 +282,13 @@ static em_event_t alloc_copy_free(em_event_t event);
 
 
 
-
 /**
- * Application creation & start up 
+ * Init and startup of the Packet Multi-stage test application.
+ *
+ * @see main() and packet_io_start() for setup and dispatch.
  */
 void
-packet_multi_stage_start(void)
+test_init(packet_io_conf_t *const packet_io_conf)
 {
   em_eo_t             eo_1st, eo_2nd, eo_3rd;
   em_queue_t          default_queue;
@@ -298,6 +300,31 @@ packet_multi_stage_start(void)
   uint32_t            q_ctx_idx   = 0;
   int                 i, j;
   
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+  
+
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         packet_io_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         packet_io_conf->num_procs,
+         packet_io_conf->num_threads);
+
+  
 #if 1 // Use different prios for the queues
   const em_queue_prio_t q_prio[Q_PRIO_LEVELS] = {EM_QUEUE_PRIO_LOW, EM_QUEUE_PRIO_NORMAL,
                                                  EM_QUEUE_PRIO_HIGH, EM_QUEUE_PRIO_HIGHEST
@@ -307,7 +334,6 @@ packet_multi_stage_start(void)
                                                  EM_QUEUE_PRIO_HIGHEST, EM_QUEUE_PRIO_HIGHEST
                                                 };
 #endif
-
 
 
   // Initialize the Queue-type permutations array

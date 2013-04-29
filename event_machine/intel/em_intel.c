@@ -49,12 +49,15 @@
 #include "em_intel_sched.h"
 #include "em_intel_event_group.h"
 #include "em_intel_queue_group.h"
-#include "em_intel_packet.h"
 #include "em_internal_event.h"
 #include "em_error.h"
 
 #include "intel_hw_init.h"
 #include "intel_alloc.h"
+
+#ifdef EVENT_PACKET
+  #include "em_intel_packet.h"
+#endif
 
 #ifdef EVENT_TIMER
   #include "event_timer.h"
@@ -73,6 +76,9 @@
 #define EOS_PER_POOL           (EM_MAX_EOS / EO_POOLS)
 
 COMPILE_TIME_ASSERT(EM_MAX_EOS == (EOS_PER_POOL * EO_POOLS), EOS_PER_POOL__TRUNKATE_ERROR);
+
+
+#define EM_Q_BASENAME          "EM_Q_"
 
 
 
@@ -254,7 +260,7 @@ static void em_eo_start_local__done_callback(void *args);
 static void em_eo_stop_local__done_callback(void *args);
 
 static em_status_t      queue_init__rings_init(void);
-static struct rte_ring *queue_init__ring_create(em_queue_type_e q_type, char *const queue_name);
+static struct rte_ring *queue_init__ring_create(em_queue_type_e q_type);
 static void             queue_init__ring_flush(struct rte_ring *ring_p);
 static em_status_t      queue_delete__ring_free(struct rte_ring *ring_p, em_queue_type_e q_type);
 
@@ -402,7 +408,6 @@ queue_alloc_init(void)
 {
   int         i, j;
   em_queue_t  queue  = FIRST_DYN_QUEUE;
-  char        em_queue_def_name[] = "EM_Q_000000000000000";
 
 
   printf("queue init\n");
@@ -413,13 +418,8 @@ queue_alloc_init(void)
 
   (void) memset(em_static_queue_lock, 0, sizeof(em_static_queue_lock));
 
+  (void) memset(em_queue_name_tbl,    0, sizeof(em_queue_name_tbl));
 
-  //(void) memset(em_queue_name_tbl,    0, sizeof(em_queue_name_tbl));
-
-  for(i = 0; i < EM_MAX_QUEUES; i++)
-  {
-    str_copy(&em_queue_name_tbl[i][0], em_queue_def_name, EM_QUEUE_NAME_LEN);
-  }
 
   //
   // Init and fill dynamic queue id pools
@@ -521,12 +521,10 @@ queue_init(const char*      name,
 {
   em_queue_element_t *q_elem;
   char               *queue_name;
-  uint64_t            cnt;
 
   q_elem     =  get_queue_element(queue);
   queue_name = &em_queue_name_tbl[queue][0];
 
-  cnt = em_core_local.queue_create_count++;
 
   q_elem->context        = NULL;
   q_elem->priority       = prio;
@@ -542,15 +540,14 @@ queue_init(const char*      name,
   q_elem->pkt_io_port_dst = 0;
 
 
-  // Intel RTE-lib requires unique names for the rte-rings (queues)
+
   if(name) {
-    //(void) str_copy(queue_name, name, EM_QUEUE_NAME_LEN);
-    (void) snprintf(queue_name, EM_QUEUE_NAME_LEN, "%s_%"PRI_QUEUE"", name, queue);
+    (void) str_copy(queue_name, name, EM_QUEUE_NAME_LEN);
   }
   else {
     // No name, use default as base with additional info to create a unique name
-    // "EM_Q_000000000000000" + Q-id + core-id + running count => e.g. EM_Q_12345_4_abcd
-    (void) snprintf(&queue_name[5], EM_QUEUE_NAME_LEN-5, "%"PRI_QUEUE"_%i_%"PRIx64"", queue, em_core_id(), cnt);
+    // "EM_Q_" + Q-id = e.g. EM_Q_1234
+    (void) snprintf(queue_name, EM_QUEUE_NAME_LEN, "%s%"PRI_QUEUE"", EM_Q_BASENAME, queue);
   }
   // ensure '\0'-termination:
   queue_name[EM_QUEUE_NAME_LEN-1] = '\0';
@@ -569,7 +566,7 @@ queue_init(const char*      name,
     q_elem->u.atomic.event_count = 0;
     q_elem->u.atomic.sched_count = 0;
     
-    q_elem->rte_ring = queue_init__ring_create(EM_QUEUE_TYPE_ATOMIC, queue_name);
+    q_elem->rte_ring = queue_init__ring_create(EM_QUEUE_TYPE_ATOMIC);
     
     ERROR_IF(q_elem->rte_ring == NULL, EM_ERR_ALLOC_FAILED, EM_ESCOPE_QUEUE_INIT,
              "rte_ring_create() failed for atomic Q:%"PRI_QUEUE" (%s)\n", queue, queue_name);
@@ -579,7 +576,7 @@ queue_init(const char*      name,
     env_spinlock_init(&q_elem->lock);
     q_elem->u.parallel_ord.order_first = NULL;
     
-    q_elem->rte_ring = queue_init__ring_create(EM_QUEUE_TYPE_PARALLEL_ORDERED, queue_name);
+    q_elem->rte_ring = queue_init__ring_create(EM_QUEUE_TYPE_PARALLEL_ORDERED);
 
     ERROR_IF(q_elem->rte_ring == NULL, EM_ERR_ALLOC_FAILED, EM_ESCOPE_QUEUE_INIT,
              "rte_ring_create() failed for parallel-ordered Q:%"PRI_QUEUE" (%s)\n", queue, queue_name);
@@ -596,9 +593,10 @@ queue_init(const char*      name,
  * Create the rte_ring needed by atomic and parallel-ordered EM-queues (q_elem->rte_ring)
  */
 static struct rte_ring *
-queue_init__ring_create(em_queue_type_t q_type, char *const queue_name)
+queue_init__ring_create(em_queue_type_t q_type)
 {
   struct rte_ring *rte_ring = NULL;
+  char ring_name[RTE_RING_NAMESIZE];
   int ret;
   
   
@@ -615,10 +613,16 @@ queue_init__ring_create(em_queue_type_t q_type, char *const queue_name)
       queue_init__ring_flush(rte_ring);
     }
     else // rte_ring == NULL
-    {  
+    { 
+      // Intel RTE-lib requires unique names for the rte-rings:
+      // "RingAtom" + core-id(where created) + running count => e.g. "RingAtom_4_012a"
+      (void) snprintf(&ring_name[0], RTE_RING_NAMESIZE, "RingAtom_%i_%"PRIx64"", em_core_id(), em_core_local.queue_create_count++);
+      ring_name[RTE_RING_NAMESIZE-1] = '\0';
+      
+      // Calls to rte_ring_create() needs to be serialized, use lock
       env_spinlock_lock(&queue_create_lock.lock);
       
-      rte_ring = rte_ring_create(queue_name, EM_QUEUE_ATOMIC_RTE_RING_SIZE, DEVICE_SOCKET, RING_F_SC_DEQ);
+      rte_ring = rte_ring_create(&ring_name[0], EM_QUEUE_ATOMIC_RTE_RING_SIZE, DEVICE_SOCKET, RING_F_SC_DEQ);
       
       env_spinlock_unlock(&queue_create_lock.lock);
     }
@@ -636,10 +640,16 @@ queue_init__ring_create(em_queue_type_t q_type, char *const queue_name)
       queue_init__ring_flush(rte_ring);
     }
     else // rte_ring == NULL
-    {  
+    { 
+      // Intel RTE-lib requires unique names for the rte-rings:
+      // "RingPO" + core-id(where created) + running count => e.g. "RingPO_5_012b"
+      (void) snprintf(ring_name, RTE_RING_NAMESIZE, "RingPO_%i_%"PRIx64"", em_core_id(), em_core_local.queue_create_count++);
+      ring_name[RTE_RING_NAMESIZE-1] = '\0';
+      
+      // Calls to rte_ring_create needs to be serialized, use lock      
       env_spinlock_lock(&queue_create_lock.lock);
       
-      rte_ring = rte_ring_create(queue_name, EM_QUEUE_PARALLEL_ORD_RTE_RING_SIZE, DEVICE_SOCKET, (RING_F_SC_DEQ | RING_F_SP_ENQ));
+      rte_ring = rte_ring_create(ring_name, EM_QUEUE_PARALLEL_ORD_RTE_RING_SIZE, DEVICE_SOCKET, (RING_F_SC_DEQ | RING_F_SP_ENQ));
       
       env_spinlock_unlock(&queue_create_lock.lock);
     }
@@ -1017,6 +1027,10 @@ em_queue_delete(em_queue_t queue)
   ret = queue_delete__ring_free(q_elem->rte_ring, q_elem->scheduler_type);
   RETURN_ERROR_IF(ret != EM_OK, EM_FATAL(ret), EM_ESCOPE_QUEUE_DELETE, 
                   "queue_delete__ring_free() failed (%i)", ret);
+  
+  
+  // Zero queue name.
+  em_queue_name_tbl[queue][0] = '\0';
   
   
   if(queue <= EM_QUEUE_STATIC_MAX)
@@ -2059,6 +2073,19 @@ em_core_id_get_physical(int logic_core)
 
 
 /**
+ * Helper func - is this the first EM-core?
+ * 
+ * @return  'true' if the caller is running on the first EM-core
+ */
+int
+em_is_first_core(void)
+{
+  return (em_core_id() == 0);
+}
+
+
+
+/**
  * Converts a logical core mask to a physical core mask
  *
  * Mainly needed when interfacing HW specific APIs
@@ -2174,7 +2201,9 @@ em_alloc(size_t size, em_event_type_t type, em_pool_id_t pool_id)
       
     
     #ifdef EVENT_TIMER
-      rte_timer_init(&ev_hdr->event_timer);
+      if(em_internal_conf.conf.evt_timer) {
+        rte_timer_init(&ev_hdr->event_timer);
+      }
     #endif  
     }
 
@@ -2247,7 +2276,7 @@ em_free(em_event_t event)
  * Global event machine initialization. Run only once.
  */
 em_status_t
-em_init_global(void)
+em_init_global(const em_internal_conf_t *const em_internal_conf)
 {
   em_status_t ret;
 
@@ -2279,11 +2308,9 @@ em_init_global(void)
   queue_alloc_init();
   eo_alloc_init();
 
+  // staged init: need to memset & init vars that are used in e.g. queue_group_init_global()
+  sched_init_global_1(); 
  
- (void) memset(core_sched_masks,      0, sizeof(core_sched_masks));
- (void) memset(core_sched_add_counts, 0, sizeof(core_sched_add_counts));
- 
-  env_spinlock_init(&sched_add_counts_lock.lock);
   env_spinlock_init(&queue_create_lock.lock);
 
   ret = queue_init__rings_init();
@@ -2293,14 +2320,16 @@ em_init_global(void)
   event_group_alloc_init();
   queue_group_init_global();
 
-
-  ret = sched_init_global();
+  // 2nd stage sched init
+  ret = sched_init_global_2();
   RETURN_ERROR_IF(ret != EM_OK, ret, EM_ESCOPE_INIT_GLOBAL, "sched_init_global() returned error");
 
 
 #ifdef EVENT_TIMER
+  if(em_internal_conf->conf.evt_timer)
   {
     int err = evt_timer_init_global();
+    
     RETURN_ERROR_IF(err != EVT_TIMER_OK, EM_ERR_LIB_FAILED, EM_ESCOPE_INIT_GLOBAL,
                     "evt_timer_init_global() returned error %i", err);
   }
@@ -2308,9 +2337,12 @@ em_init_global(void)
   
   
 #ifdef EVENT_PACKET
-  intel_eth_init();
-
-  intel_init_packet_q_hash_global();
+  if(em_internal_conf->conf.pkt_io)
+  {
+    intel_eth_init();
+    
+    intel_init_packet_q_hash_global();
+  }
 #endif
 
 
@@ -2325,7 +2357,7 @@ em_init_global(void)
  * Local event machine initialization. Run on each core.
  */
 em_status_t
-em_init_local(void)
+em_init_local(const em_internal_conf_t *const em_internal_conf)
 {
   unsigned     core_id;
   em_status_t  stat;
@@ -2335,7 +2367,9 @@ em_init_local(void)
 
   printf("em_init_local() on em-core %u\n", core_id);
 
-  (void) memset(&em_core_local, 0, sizeof(em_core_local));
+  // Don't memset em_core_local anymore, use static initialization at declaration,
+  // because EM-core 0 might use these vars during global startup - thus avoid dual initialization.
+  //(void) memset(&em_core_local, 0, sizeof(em_core_local));
 
 
   stat = queue_group_init_local();
@@ -2347,6 +2381,7 @@ em_init_local(void)
   
 
 #ifdef EVENT_TIMER
+  if(em_internal_conf->conf.evt_timer)
   {
     int err = evt_timer_init_local();
     RETURN_ERROR_IF(err != EVT_TIMER_OK, EM_ERR_LIB_FAILED, EM_ESCOPE_EM_INIT_LOCAL,
@@ -2357,9 +2392,12 @@ em_init_local(void)
 
 
 #ifdef EVENT_PACKET
-  intel_eth_init_local();
-
-  intel_init_packet_q_hash_local();
+  if(em_internal_conf->conf.pkt_io)
+  {
+    intel_eth_init_local();
+    
+    intel_init_packet_q_hash_local();
+  }
 #endif
 
 

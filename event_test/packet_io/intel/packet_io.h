@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) 2012, Nokia Siemens Networks
+ *   Copyright (c) 2013, Nokia Siemens Networks
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -24,40 +24,63 @@
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+ 
+
+/**
+ * @file
+ *
+ * Packet I/O example include file
+ *
+ */
+
+#ifndef PACKET_IO_H
+#define PACKET_IO_H
+
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+
+#define PACKET_IO_NAME_LEN  (32)
+
+/* Get rid of path in filename - only for unix-type paths using '/' */
+#define NO_PATH(file_name) (strrchr((file_name), '/') ? strrchr((file_name), '/') + 1 : (file_name))
+
 
 
 /**
- * Application global initialization run once at startup on one core.
- *
+ * Application configuration
  */
-void
-em_app_init_global(int app_argc, char *app_argv[])
+typedef struct
 {
-  /*
-   * Simple Packet-IO Examples
-   */
-  #if defined(PACKET_LOOPBACK)
-    extern void packet_loopback_start(void);  
-    packet_loopback_start();
-    
-  #elif defined(PACKET_MULTI_STAGE)
-    extern void packet_multi_stage_start(void);
-    packet_multi_stage_start();
-  #endif
-}
-
+  char name[PACKET_IO_NAME_LEN]; /**< application name */
+  
+  unsigned  num_procs;           /**< for future use */
+  
+  unsigned  num_threads;         /**< for future use */
+  
+  /* Add further if needed */
+  
+} packet_io_conf_t;
 
 
 
 /**
- * Application local intialization run once at startup on each core.
- *
+ * All examples implement the test_init() function to keep a common main() and packet_io_start()
  */
 void
-em_app_init_local(void)
-{
-  return;
-}
+test_init(packet_io_conf_t *const packet_io_conf);
 
+
+#ifdef __cplusplus
+}
+#endif
+
+
+
+#endif
 
 

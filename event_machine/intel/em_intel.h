@@ -126,6 +126,27 @@ COMPILE_TIME_ASSERT(POWEROF2(STATIC_QUEUE_LOCKS), STATIC_QUEUE_LOCKS__NOT_POWER_
 
 
 
+/**
+ * EM internal run-time configuration options stored at startup
+ */
+typedef union
+{
+  struct
+  {
+    em_conf_t conf; /**< Copy of config as given to em_init() */
+    
+    /* Add further internal config */
+  };
+  
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  
+} em_internal_conf_t;
+
+
+extern ENV_SHARED  em_internal_conf_t  em_internal_conf  ENV_CACHE_LINE_ALIGNED;
+
+
+
 /*
  * EO state
  *
@@ -424,6 +445,29 @@ extern ENV_LOCAL   em_core_local_t     em_core_local;
 /*
  * Functions
  */
+
+
+/**
+ * Global initialization of EM internals. Only one core calls this function once.
+ *
+ * @return status, EM_OK on success
+ */
+em_status_t
+em_init_global(const em_internal_conf_t *const em_internal_conf);
+
+
+/**
+ * Local initialization of EM internals. All cores call this and it must be called
+ * after em_init_global().
+ * Implementation may be actually empty, but this might be needed later for some
+ * core specific initializations.
+ *
+ * @return status, EM_OK on success
+ */
+em_status_t
+em_init_local(const em_internal_conf_t *const em_internal_conf);
+
+
 
 static inline em_queue_element_t*
 m_list_node_to_queue_elem(m_list_head_t* list_node)

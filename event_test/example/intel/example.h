@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) 2012, Nokia Siemens Networks
+ *   Copyright (c) 2013, Nokia Siemens Networks
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -24,49 +24,64 @@
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
+ 
 
 /**
- * Application global initialization run once at startup on one core.
+ * @file
+ *
+ * Example include file
  *
  */
-void
-em_app_init_global(int app_argc, char *app_argv[])
-{
-  /*
-   * Simple Event Machine test applications
-   */
-   
-  #if defined(TEST_APPL_HELLO)
-    extern void test_appl_hello_start(void);
-    test_appl_hello_start();
 
-  #elif defined(TEST_APPL_PERF)
-    extern void test_appl_perf_start(void);
-    test_appl_perf_start();
+#ifndef EXAMPLE_H
+#define EXAMPLE_H
 
-  #elif defined(TEST_APPL_EVENT_GROUP)
-    extern void test_appl_event_group_start(void);     
-    test_appl_event_group_start();
 
-  #elif defined(TEST_APPL_ERROR)
-    extern void test_appl_error_start(void);
-    test_appl_error_start();
-  #endif
-}
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+
+#define EXAMPLE_NAME_LEN  (32)
+
+/* Get rid of path in filename - only for unix-type paths using '/' */
+#define NO_PATH(file_name) (strrchr((file_name), '/') ? strrchr((file_name), '/') + 1 : (file_name))
 
 
 
 /**
- * Application local intialization run once at startup on each core.
- *
+ * Application configuration
+ */
+typedef struct
+{
+  char name[EXAMPLE_NAME_LEN]; /**< application name */
+  
+  unsigned num_procs;          /**< for future use */
+                               
+  unsigned num_threads;        /**< for future use */
+  
+  /* Add further if needed */
+  
+} example_conf_t;
+
+
+
+/**
+ * All examples implement the test_init() function to keep a common main() and example_start()
  */
 void
-em_app_init_local(void)
-{
-  return;
-}
+test_init(example_conf_t *const example_conf);
 
+
+
+#ifdef __cplusplus
+}
+#endif
+
+
+
+#endif
 
 

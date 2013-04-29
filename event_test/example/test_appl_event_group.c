@@ -54,6 +54,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "example.h"
+
 
 
 /*
@@ -202,9 +204,93 @@ ENV_SHARED  static  uint8_t  event_group_test_data[DATA_EVENTS * DATA_PER_EVENT]
 /*
  * Local function prototypes
  */
+static em_status_t
+egroup_start(void* eo_context, em_eo_t eo);
+
+static em_status_t
+egroup_stop(void* eo_context, em_eo_t eo);
+
+static void
+egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx);
+
 static void
 delay_spin(const uint64_t spin_count);
 
+
+
+/**
+ * Init and startup of the Event Group test application.
+ *
+ * @see main() and example_start() for setup and dispatch.
+ */
+void
+test_init(example_conf_t *const example_conf)
+{
+  em_eo_t             eo;
+  eo_context_t*       eo_ctx;
+  em_queue_t          queue;
+  em_event_t          event;
+  event_group_test_t* egroup_test;
+  em_status_t         ret;
+  em_status_t         eo_start_ret; // return value from the EO's start function 'group_start'
+  
+  
+  /*
+   * Initializations only on one EM-core, return on all others.
+   */  
+  if(em_core_id() != 0)
+  {
+    return;
+  }
+
+
+  printf("\n**********************************************************************\n"
+         "EM APPLICATION: '%s' initializing: \n"
+         "  %s: %s() - EM-core:%i \n"
+         "  Application running on %d EM-cores (procs:%d, threads:%d)."
+         "\n**********************************************************************\n"
+         "\n"
+         ,
+         example_conf->name,
+         NO_PATH(__FILE__), __func__,
+         em_core_id(),
+         em_core_count(),
+         example_conf->num_procs,
+         example_conf->num_threads);
+         
+  
+  /*
+   * Create the event group test EO and a parallel queue, add the queue to the EO
+   */
+  eo_ctx = &event_group_test_eo_context.eo_ctx;
+  
+  eo    = em_eo_create("group test appl", egroup_start, NULL, egroup_stop, NULL, egroup_receive, eo_ctx);  
+  queue = em_queue_create("group test parallelQ", EM_QUEUE_TYPE_PARALLEL, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+
+  ret = em_eo_add_queue(eo, queue);
+  IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue);
+  
+  ret = em_queue_enable(queue);
+  IS_ERROR(ret != EM_OK, "Queue enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue);
+  
+  // Start the EO (triggers the EO's start function 'group_start')
+  ret = em_eo_start(eo, &eo_start_ret, 0, NULL);
+  
+  IS_ERROR((ret != EM_OK) || (eo_start_ret != EM_OK),
+           "em_eo_start() failed! EO: %"PRI_EO", ret: %u, EO-start-ret: %u \n", eo, ret, eo_start_ret);
+
+
+  event = em_alloc(sizeof(event_group_test_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
+  IS_ERROR(event == EM_EVENT_UNDEF, "Event allocation failed! \n");
+  
+
+  egroup_test = em_event_pointer(event);
+  
+  egroup_test->msg = MSG_START;
+
+  ret = em_send(event, queue);
+  IS_ERROR(ret != EM_OK, "Event send failed (%u)! queue: %"PRI_QUEUE" \n", ret, queue);
+}  
 
 
 
@@ -217,7 +303,7 @@ delay_spin(const uint64_t spin_count);
  *
  */
 static em_status_t
-group_start(void* eo_context, em_eo_t eo)
+egroup_start(void* eo_context, em_eo_t eo)
 {
   eo_context_t* eo_ctx = eo_context;
   
@@ -241,7 +327,6 @@ group_start(void* eo_context, em_eo_t eo)
 
 
 
-
 /**
  * @private
  * 
@@ -249,11 +334,10 @@ group_start(void* eo_context, em_eo_t eo)
  *
  */
 static em_status_t
-group_stop(void* eo_context, em_eo_t eo)
+egroup_stop(void* eo_context, em_eo_t eo)
 {
   return EM_OK;
 }
-
 
 
 
@@ -264,9 +348,9 @@ group_stop(void* eo_context, em_eo_t eo)
  *
  */
 static void
-group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
+egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
 {
-  event_group_test_t* group_test;
+  event_group_test_t* egroup_test;
   em_notif_t          notif_tbl[1];
   em_status_t         ret;
   uint64_t            diff;
@@ -274,9 +358,9 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
   int                 i;
   eo_context_t*       eo_ctx = eo_context;
 
-  group_test = em_event_pointer(event);
+  egroup_test = em_event_pointer(event);
 
-  switch(group_test->msg)
+  switch(egroup_test->msg)
   {
     case MSG_START:    
       {
@@ -291,10 +375,10 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
         
         
         // Re-use the start event as the notification event
-        group_test->msg          = MSG_DONE;
-        group_test->data_ptr     = NULL;
-        group_test->start_cycles = env_get_cycle();
-        group_test->increment    = 0;
+        egroup_test->msg          = MSG_DONE;
+        egroup_test->data_ptr     = NULL;
+        egroup_test->start_cycles = env_get_cycle();
+        egroup_test->increment    = 0;
         
         // The notification 'event' should be sent to 'queue' when done
         notif_tbl[0].event = event;
@@ -350,7 +434,7 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
         
         for(i = 0; i < DATA_PER_EVENT; i++)
         {
-          sum += group_test->data_ptr[i];
+          sum += egroup_test->data_ptr[i];
         }
         
         eo_ctx->acc += sum;
@@ -365,11 +449,11 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
          * Note that the total number of events received will become larger than
          * 'eo_ctx->event_count' before the notification 'MSG_DONE' is received.
          */
-        if(group_test->increment)
+        if(egroup_test->increment)
         {
           em_event_group_t event_group;
         
-          group_test->increment--;
+          egroup_test->increment--;
         
           // increment event count in group
           (void) em_event_group_increment(1);
@@ -402,7 +486,7 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
         
          
         // Calculate results. Ignore first round because of cold caches.
-        diff = env_get_cycle() - group_test->start_cycles;
+        diff = env_get_cycle() - egroup_test->start_cycles;
       
         if(eo_ctx->total_rounds == 0) {
           /* Ignore */
@@ -441,7 +525,7 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
         
         (void) memset(core_stats, 0, sizeof(core_stats));
         
-        group_test->msg = MSG_START;
+        egroup_test->msg = MSG_START;
       
         ret = em_send(event, queue);
         IS_ERROR(ret != EM_OK, "Event send failed (%u)! queue: %"PRI_QUEUE" \n", ret, queue);
@@ -450,63 +534,10 @@ group_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
 
 
     default:
-      IS_ERROR(1, "Bad msg (%"PRIu64")! \n", group_test->msg);
+      IS_ERROR(1, "Bad msg (%"PRIu64")! \n", egroup_test->msg);
   };
 
 }
-
-
-
-
-/**
- * Global init and startup of the event group test application.
- *
- */
-void
-test_appl_event_group_start(void)
-{
-  em_eo_t             eo;
-  eo_context_t*       eo_ctx;
-  em_queue_t          queue;
-  em_event_t          event;
-  event_group_test_t* group_test;
-  em_status_t         ret;
-  em_status_t         eo_start_ret; // return value from the EO's start function 'group_start'
-
-  
-  /*
-   * Create the event group test EO and a parallel queue, add the queue to the EO
-   */
-  eo_ctx = &event_group_test_eo_context.eo_ctx;
-  
-  eo    = em_eo_create("group test appl", group_start, NULL, group_stop, NULL, group_receive, eo_ctx);  
-  queue = em_queue_create("group test parallelQ", EM_QUEUE_TYPE_PARALLEL, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
-
-  ret = em_eo_add_queue(eo, queue);
-  IS_ERROR(ret != EM_OK, "EO or queue creation failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue);
-  
-  ret = em_queue_enable(queue);
-  IS_ERROR(ret != EM_OK, "Queue enable failed (%u). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue);
-  
-  // Start the EO (triggers the EO's start function 'group_start')
-  ret = em_eo_start(eo, &eo_start_ret, 0, NULL);
-  
-  IS_ERROR((ret != EM_OK) || (eo_start_ret != EM_OK),
-           "em_eo_start() failed! EO: %"PRI_EO", ret: %u, EO-start-ret: %u \n", eo, ret, eo_start_ret);
-
-
-  event = em_alloc(sizeof(event_group_test_t), EM_EVENT_TYPE_SW, EM_POOL_DEFAULT);
-  IS_ERROR(event == EM_EVENT_UNDEF, "Event allocation failed! \n");
-  
-
-  group_test = em_event_pointer(event);
-  
-  group_test->msg = MSG_START;
-
-  ret = em_send(event, queue);
-  IS_ERROR(ret != EM_OK, "Event send failed (%u)! queue: %"PRI_QUEUE" \n", ret, queue);
-}
-
 
 
 

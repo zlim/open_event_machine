@@ -25,33 +25,55 @@
  *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
  
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#include <rte_debug.h>
+
+#include "event_machine.h"
+#include "environment.h"
+#include "em_intel.h"
+#include "em_error.h"
+
+
+/*
+ * Defines
+ */
+
+
+/*
+ * Macros
+ */ 
+
+
+/*
+ * Local Data Types
+ */
+
+ENV_SHARED  em_internal_conf_t  em_internal_conf  ENV_CACHE_LINE_ALIGNED;
+
+COMPILE_TIME_ASSERT((sizeof(em_internal_conf) % ENV_CACHE_LINE_SIZE) == 0, EM_INIT_SIZE_ERROR);
+
+
 
 /**
- * @file
- *
- * Event Machine HW specific functions and other additions.
- *
+ * Local Function Prototypes
  */
- 
-#ifndef EVENT_MACHINE_HW_SPECIFIC_H
-#define EVENT_MACHINE_HW_SPECIFIC_H
 
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
+/* - */
 
 
 
 /**
  * Initialize the Event Machine.
  *
- * Called once at startup. Additionally each EM-core needs to call the 
+ * Called once at startup (per process). Additionally each EM-core needs to call the 
  * em_init_core() function before using any further EM API functions/resources.
  *
+ * @param argc   Command line argument count (if any)
+ * @param argv   Command line arguments (if any) 
  * @param conf   EM runtime config options
  *
  * @return EM_OK if successful.
@@ -59,7 +81,28 @@ extern "C" {
  * @see em_init_core() for EM-core specific init after em_init().
  */
 em_status_t
-em_init(em_conf_t *conf);
+em_init(em_conf_t *conf)
+{ 
+  em_status_t em_ret;
+ 
+  
+  (void) memset(&em_internal_conf, 0, sizeof(em_internal_conf));
+  
+  /* Copy configuration contents */
+  em_internal_conf.conf = *conf;
+  
+  /* Global internal EM-config */
+  em_ret = em_init_global(&em_internal_conf);
+  
+  if(em_ret != EM_OK)
+  {
+    // Call rte_panic() directly - the EM error handler might not be properly initialized yet.
+    rte_panic("%s(): Internal em_init_global() fails! retval=%u\n",
+              __func__, em_ret);
+  }
+  
+  return em_ret;
+}
 
 
 
@@ -74,60 +117,39 @@ em_init(em_conf_t *conf);
  * @see em_init()
  */
 em_status_t
-em_init_core(void);
-
-
-
-
-/**
- * EM event dispatch.
- * 
- * Called by each EM-core to dispatch events for EM processing.
- *
- * @param rounds   Dispatch rounds before returning, 0 means 'never return from dispatch'
- */
-void
-em_dispatch(uint32_t rounds);
-
-
-
-/**
- * Get pointer to event structure
- *
- * Returns pointer to the event structure or NULL. Event structure is
- * implementation and event type specific. It may be a directly 
- * accessible buffer of memory, a descriptor containing a list of 
- * buffer pointers, a descriptor of a packet buffer, etc.
- *
- * @param event   Event from receive/alloc
- *
- * @return Event pointer or NULL
- */
-static inline void*
-em_event_pointer(em_event_t event)
+em_init_core(void)
 {
-  return event;
+  /*
+   * Init executed on all running cores
+   */
+  em_status_t em_ret;
+
+  
+  
+  /* 
+   * LOCAL EM initializations - on all lcores
+   */
+  em_ret = em_init_local(&em_internal_conf);
+  
+  RETURN_ERROR_IF(em_ret != EM_OK, EM_FATAL(em_ret), EM_ESCOPE_INIT_CORE,
+                  "Internal em_init_local() fails on core%i",
+                  em_core_id());
+   
+
+  /*
+   * Print some info about the Env&HW
+   */
+  if(em_core_id() == 0) {
+    em_print_info();
+  }
+  
+
+  env_sync_mem();
+  
+  
+  return em_ret;
 }
 
 
-
-/**
- * Helper func - is this the first EM-core?
- * 
- * @return  'true' if the caller is running on the first EM-core
- */
-int
-em_is_first_core(void);
-
-
-
-
-#ifdef __cplusplus
-}
-#endif
-
-
-
-#endif
 
 

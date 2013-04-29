@@ -102,7 +102,7 @@ extern "C" {
 
 #define MRING_NAMESIZE 32 /**< The maximum length of a ring name. */
 
-#define NUM_PRIORITIES	4
+#define NUM_PRIORITIES  4
 //#define RING_SIZE 1024
 #define RING_SIZE (4*1024)
 #define RING_MASK (RING_SIZE-1)
@@ -114,12 +114,12 @@ extern "C" {
  *  - Two 64-bit values.
  */
 union umultiint {
-	uint32_t val[NUM_PRIORITIES];
-	__m128i mval;
-	struct {
-		uint64_t hiqw;
-		uint64_t loqw;
-	};
+  uint32_t val[NUM_PRIORITIES];
+  __m128i mval;
+  struct {
+    uint64_t hiqw;
+    uint64_t loqw;
+  };
 };
 
 /**
@@ -129,12 +129,12 @@ union umultiint {
  *  - Two 64-bit values.
  */
 union smultiint {
-	int32_t val[NUM_PRIORITIES];
-	__m128i mval;
-	struct {
-		uint64_t hiqw;
-		uint64_t loqw;
-	};
+  int32_t val[NUM_PRIORITIES];
+  __m128i mval;
+  struct {
+    uint64_t hiqw;
+    uint64_t loqw;
+  };
 };
 
 /**
@@ -149,26 +149,26 @@ union smultiint {
  */
 struct multiring {
 
-	char name[MRING_NAMESIZE];    /**< Name of the ring. */
-	int flags;                       /**< Flags supplied at creation. */
+  char name[MRING_NAMESIZE];    /**< Name of the ring. */
+  int flags;                       /**< Flags supplied at creation. */
 
-	/** Ring producer status. */
-	struct mprod {
-		volatile union umultiint head;  /**< Producer head. */
-		volatile union umultiint tail;  /**< Producer tail. */
-		uint32_t sp_enqueue;     /**< True, if single producer. */
-	} prod __rte_cache_aligned;
+  /** Ring producer status. */
+  struct mprod {
+    volatile union umultiint head;  /**< Producer head. */
+    volatile union umultiint tail;  /**< Producer tail. */
+    uint32_t sp_enqueue;     /**< True, if single producer. */
+  } prod __rte_cache_aligned;
 
-	/** Ring consumer status. */
-	struct mcons {
-		volatile union umultiint head;  /**< Consumer head. */
-		volatile union umultiint tail;  /**< Consumer tail. */
-		uint32_t sc_dequeue;     /**< True, if single consumer. */
-	} cons __rte_cache_aligned;
+  /** Ring consumer status. */
+  struct mcons {
+    volatile union umultiint head;  /**< Consumer head. */
+    volatile union umultiint tail;  /**< Consumer tail. */
+    uint32_t sc_dequeue;     /**< True, if single consumer. */
+  } cons __rte_cache_aligned;
 
 
-	void * volatile ring[NUM_PRIORITIES][RING_SIZE] \
-			__rte_cache_aligned; /**< Memory space of ring starts here. */
+  void * volatile ring[NUM_PRIORITIES][RING_SIZE] \
+      __rte_cache_aligned; /**< Memory space of ring starts here. */
 };
 
 #define RING_F_SP_ENQ 0x0001 /**< The default enqueue is "single-producer". */
@@ -258,53 +258,53 @@ mring_create(const char *name, int socket_id, unsigned flags)
  */
 static inline int
 __mring_mp_do_enqueue(struct multiring *r, const uint8_t priority,
-		void * const *obj_table, const unsigned max)
+    void * const *obj_table, const unsigned max)
 {
-	uint32_t prod_head, prod_next;
-	uint32_t cons_tail, free_entries;
-	unsigned n;
-	int success;
-	unsigned i;
+  uint32_t prod_head, prod_next;
+  uint32_t cons_tail, free_entries;
+  unsigned n;
+  int success;
+  unsigned i;
 
-	/* move prod.head atomically */
-	do {
-		/* Reset n to the initial burst count */
-		n = max;
+  /* move prod.head atomically */
+  do {
+    /* Reset n to the initial burst count */
+    n = max;
 
-		prod_head = r->prod.head.val[priority];
-		cons_tail = r->cons.tail.val[priority];
-		/* The subtraction is done between two unsigned 32bits value
-		 * (the result is always modulo 32 bits even if we have
-		 * prod_head > cons_tail). So 'free_entries' is always between 0
-		 * and size(ring)-1. */
-		free_entries = (RING_MASK + cons_tail - prod_head);
+    prod_head = r->prod.head.val[priority];
+    cons_tail = r->cons.tail.val[priority];
+    /* The subtraction is done between two unsigned 32bits value
+     * (the result is always modulo 32 bits even if we have
+     * prod_head > cons_tail). So 'free_entries' is always between 0
+     * and size(ring)-1. */
+    free_entries = (RING_MASK + cons_tail - prod_head);
 
-		/* check that we have enough room in ring */
-		if (unlikely(n > free_entries))
-			n = free_entries;
+    /* check that we have enough room in ring */
+    if (unlikely(n > free_entries))
+      n = free_entries;
 
-		if (unlikely(n == 0))
-			return 0;
+    if (unlikely(n == 0))
+      return 0;
 
-		prod_next = prod_head + n;
-		success = rte_atomic32_cmpset(&r->prod.head.val[priority], prod_head,
-					      prod_next);
-	} while (unlikely(success == 0));
+    prod_next = prod_head + n;
+    success = rte_atomic32_cmpset(&r->prod.head.val[priority], prod_head,
+                prod_next);
+  } while (unlikely(success == 0));
 
-	/* write entries in ring */
-	for (i = 0; likely(i < n); i++)
-		r->ring[priority][(prod_head + i) & RING_MASK] = obj_table[i];
-	rte_wmb();
+  /* write entries in ring */
+  for (i = 0; likely(i < n); i++)
+    r->ring[priority][(prod_head + i) & RING_MASK] = obj_table[i];
+  rte_wmb();
 
-	/*
-	 * If there are other enqueues in progress that preceeded us,
-	 * we need to wait for them to complete
-	 */
-	while (unlikely(r->prod.tail.val[priority] != prod_head))
-		rte_pause();
+  /*
+   * If there are other enqueues in progress that preceeded us,
+   * we need to wait for them to complete
+   */
+  while (unlikely(r->prod.tail.val[priority] != prod_head))
+    rte_pause();
 
-	r->prod.tail.val[priority] = prod_next;
-	return n;
+  r->prod.tail.val[priority] = prod_next;
+  return n;
 }
 
 /**
@@ -323,37 +323,37 @@ __mring_mp_do_enqueue(struct multiring *r, const uint8_t priority,
  */
 static inline int
 __mring_sp_do_enqueue(struct multiring *r, const uint8_t priority,
-		void * const *obj_table, unsigned n)
+    void * const *obj_table, unsigned n)
 {
-	uint32_t prod_head, cons_tail;
-	uint32_t prod_next, free_entries;
-	unsigned i;
+  uint32_t prod_head, cons_tail;
+  uint32_t prod_next, free_entries;
+  unsigned i;
 
-	prod_head = r->prod.head.val[priority];
-	cons_tail = r->cons.tail.val[priority];
-	/* The subtraction is done between two unsigned 32bits value
-	 * (the result is always modulo 32 bits even if we have
-	 * prod_head > cons_tail). So 'free_entries' is always between 0
-	 * and size(ring)-1. */
-	free_entries = RING_MASK + cons_tail - prod_head;
+  prod_head = r->prod.head.val[priority];
+  cons_tail = r->cons.tail.val[priority];
+  /* The subtraction is done between two unsigned 32bits value
+   * (the result is always modulo 32 bits even if we have
+   * prod_head > cons_tail). So 'free_entries' is always between 0
+   * and size(ring)-1. */
+  free_entries = RING_MASK + cons_tail - prod_head;
 
-	/* check that we have enough room in ring */
-	if (unlikely(n > free_entries))
-		n = free_entries;
+  /* check that we have enough room in ring */
+  if (unlikely(n > free_entries))
+    n = free_entries;
 
-	if (unlikely(n == 0))
-		return 0;
+  if (unlikely(n == 0))
+    return 0;
 
-	prod_next = prod_head + n;
-	r->prod.head.val[priority] = prod_next;
+  prod_next = prod_head + n;
+  r->prod.head.val[priority] = prod_next;
 
-	/* write entries in ring */
-	for (i = 0; likely(i < n); i++)
-		r->ring[priority][(prod_head + i) & RING_MASK] = obj_table[i];
-	rte_wmb();
+  /* write entries in ring */
+  for (i = 0; likely(i < n); i++)
+    r->ring[priority][(prod_head + i) & RING_MASK] = obj_table[i];
+  rte_wmb();
 
-	r->prod.tail.val[priority] = prod_next;
-	return n;
+  r->prod.tail.val[priority] = prod_next;
+  return n;
 }
 
 /**
@@ -378,54 +378,54 @@ __mring_sp_do_enqueue(struct multiring *r, const uint8_t priority,
 
 static inline int
 __mring_mc_do_dequeue(struct multiring *r, const uint8_t priority,
-		void **obj_table, unsigned n)
+    void **obj_table, unsigned n)
 {
-	uint32_t cons_head, prod_tail;
-	uint32_t cons_next, entries;
-	const unsigned max = n;
-	int success;
-	unsigned i;
+  uint32_t cons_head, prod_tail;
+  uint32_t cons_next, entries;
+  const unsigned max = n;
+  int success;
+  unsigned i;
 
-	/* move cons.head atomically */
-	do {
-		/* Restore n as it may change every loop */
-		n = max;
+  /* move cons.head atomically */
+  do {
+    /* Restore n as it may change every loop */
+    n = max;
 
-		cons_head = r->cons.head.val[priority];
-		prod_tail = r->prod.tail.val[priority];
-		/* The subtraction is done between two unsigned 32bits value
-		 * (the result is always modulo 32 bits even if we have
-		 * cons_head > prod_tail). So 'entries' is always between 0
-		 * and size(ring)-1. */
-		entries = (prod_tail - cons_head);
+    cons_head = r->cons.head.val[priority];
+    prod_tail = r->prod.tail.val[priority];
+    /* The subtraction is done between two unsigned 32bits value
+     * (the result is always modulo 32 bits even if we have
+     * cons_head > prod_tail). So 'entries' is always between 0
+     * and size(ring)-1. */
+    entries = (prod_tail - cons_head);
 
-		/* Set the actual entries for dequeue */
-		if (unlikely(n > entries))
-			n = entries;
-		if (unlikely(n == 0))
-			return 0;
+    /* Set the actual entries for dequeue */
+    if (unlikely(n > entries))
+      n = entries;
+    if (unlikely(n == 0))
+      return 0;
 
-		cons_next = cons_head + n;
-		success = rte_atomic32_cmpset(&r->cons.head.val[priority], cons_head,
-					      cons_next);
-	} while (unlikely(success == 0));
+    cons_next = cons_head + n;
+    success = rte_atomic32_cmpset(&r->cons.head.val[priority], cons_head,
+                cons_next);
+  } while (unlikely(success == 0));
 
-	/* copy in table */
-	rte_rmb();
-	for (i = 0; likely(i < n); i++) {
-		obj_table[i] = r->ring[priority][(cons_head + i) & RING_MASK];
-	}
+  /* copy in table */
+  rte_rmb();
+  for (i = 0; likely(i < n); i++) {
+    obj_table[i] = r->ring[priority][(cons_head + i) & RING_MASK];
+  }
 
-	/*
-	 * If there are other dequeues in progress that preceded us,
-	 * we need to wait for them to complete
-	 */
-	while (unlikely(r->cons.tail.val[priority] != cons_head))
-		rte_pause();
+  /*
+   * If there are other dequeues in progress that preceded us,
+   * we need to wait for them to complete
+   */
+  while (unlikely(r->cons.tail.val[priority] != cons_head))
+    rte_pause();
 
-	r->cons.tail.val[priority] = cons_next;
+  r->cons.tail.val[priority] = cons_next;
 
-	return n;
+  return n;
 }
 
 /**
@@ -446,36 +446,36 @@ __mring_mc_do_dequeue(struct multiring *r, const uint8_t priority,
  */
 static inline int
 __mring_sc_do_dequeue(struct multiring *r, const uint8_t priority,
-		void **obj_table, unsigned n)
+    void **obj_table, unsigned n)
 {
-	uint32_t cons_head, prod_tail;
-	uint32_t cons_next, entries;
-	unsigned i;
+  uint32_t cons_head, prod_tail;
+  uint32_t cons_next, entries;
+  unsigned i;
 
-	cons_head = r->cons.head.val[priority];
-	prod_tail = r->prod.tail.val[priority];
-	/* The subtraction is done between two unsigned 32bits value
-	 * (the result is always modulo 32 bits even if we have
-	 * cons_head > prod_tail). So 'entries' is always between 0
-	 * and size(ring)-1. */
-	entries = prod_tail - cons_head;
+  cons_head = r->cons.head.val[priority];
+  prod_tail = r->prod.tail.val[priority];
+  /* The subtraction is done between two unsigned 32bits value
+   * (the result is always modulo 32 bits even if we have
+   * cons_head > prod_tail). So 'entries' is always between 0
+   * and size(ring)-1. */
+  entries = prod_tail - cons_head;
 
-	if (unlikely(n > entries))
-		n = entries;
-	if (unlikely(n == 0))
-		return 0;
+  if (unlikely(n > entries))
+    n = entries;
+  if (unlikely(n == 0))
+    return 0;
 
-	cons_next = cons_head + n;
-	r->cons.head.val[priority] = cons_next;
+  cons_next = cons_head + n;
+  r->cons.head.val[priority] = cons_next;
 
-	/* copy in table */
-	rte_rmb();
-	for (i = 0; likely(i < n); i++) {
-		obj_table[i] = r->ring[priority][(cons_head + i) & RING_MASK];
-	}
+  /* copy in table */
+  rte_rmb();
+  for (i = 0; likely(i < n); i++) {
+    obj_table[i] = r->ring[priority][(cons_head + i) & RING_MASK];
+  }
 
-	r->cons.tail.val[priority] = cons_next;
-	return n;
+  r->cons.tail.val[priority] = cons_next;
+  return n;
 }
 
 /**
@@ -498,12 +498,12 @@ __mring_sc_do_dequeue(struct multiring *r, const uint8_t priority,
  */
 static inline int
 mring_enqueue_burst(struct multiring *r, const uint8_t priority,
-		void * const *obj_table, unsigned n)
+    void * const *obj_table, unsigned n)
 {
-	if (r->prod.sp_enqueue)
-		return 	__mring_sp_do_enqueue(r, priority, obj_table, n);
-	else
-		return 	__mring_mp_do_enqueue(r, priority, obj_table, n);
+  if (r->prod.sp_enqueue)
+    return  __mring_sp_do_enqueue(r, priority, obj_table, n);
+  else
+    return  __mring_mp_do_enqueue(r, priority, obj_table, n);
 }
 
 
@@ -527,12 +527,12 @@ mring_enqueue_burst(struct multiring *r, const uint8_t priority,
  */
 static inline int
 mring_dequeue_burst(struct multiring *r, const uint8_t priority,
-		void **obj_table, unsigned n)
+    void **obj_table, unsigned n)
 {
-	if (r->cons.sc_dequeue)
-		return __mring_sc_do_dequeue(r, priority, obj_table, n);
-	else
-		return __mring_mc_do_dequeue(r, priority, obj_table, n);
+  if (r->cons.sc_dequeue)
+    return __mring_sc_do_dequeue(r, priority, obj_table, n);
+  else
+    return __mring_mc_do_dequeue(r, priority, obj_table, n);
 }
 
 /**
@@ -554,7 +554,7 @@ mring_dequeue_burst(struct multiring *r, const uint8_t priority,
 static inline int
 mring_enqueue(struct multiring *r, const uint8_t priority, void *obj)
 {
-	return mring_enqueue_burst(r, priority, &obj, 1);
+  return mring_enqueue_burst(r, priority, &obj, 1);
 }
 
 /**
@@ -576,10 +576,10 @@ mring_enqueue(struct multiring *r, const uint8_t priority, void *obj)
 static inline int
 mring_dequeue(struct multiring *r, const uint8_t priority, void **obj_p)
 {
-	if (r->cons.sc_dequeue)
-		return __mring_sc_do_dequeue(r, priority, obj_p, 1);
-	else
-		return __mring_mc_do_dequeue(r, priority, obj_p, 1);
+  if (r->cons.sc_dequeue)
+    return __mring_sc_do_dequeue(r, priority, obj_p, 1);
+  else
+    return __mring_mc_do_dequeue(r, priority, obj_p, 1);
 }
 
 /**
@@ -594,76 +594,89 @@ mring_dequeue(struct multiring *r, const uint8_t priority, void **obj_p)
  *   Max number of items to dequeue, limited to 16, 32 or 64.
  * @return
  *   - Number of objects dequeued.
- */
+ */ 
 static inline int
 mring_dequeue_mp_burst(struct multiring *r, void **obj_p, const int max)
 {
-	union umultiint quota = {.val = {1, 2, 4, 9}};
-	union umultiint cons_head, prod_tail;
-	union umultiint cons_next, entries;
-	unsigned j, buf_idx=0;
-	int i, n;
-	uint8_t success;
+  //union umultiint quota_4  = {.val = {1, 1, 1, 1}};
+  union umultiint quota_8   = {.val = {1,  2,  2,  3}};
+  union umultiint quota_16  = {.val = {1,  2,  4,  9}};
+  union umultiint quota_32  = {.val = {2,  4,  8, 18}};
+  union umultiint quota_64  = {.val = {4,  8, 16, 36}};
+  //union umultiint quota_128 = {.val = {8, 16, 32, 72}};
+  
+  union umultiint *quota_ptr;
+  
+  union umultiint cons_head, prod_tail;
+  union umultiint cons_next, entries;
+  unsigned j, buf_idx=0;
+  int i, n;
+  uint8_t success;
 
-	switch (max) {
-	case 16: break;
-	case 32: quota.mval = _mm_slli_epi32(quota.mval, 1); break;
-	case 64: quota.mval = _mm_slli_epi32(quota.mval, 2);break;
-	default: return 0;
-	}
 
-	do {
-		cons_head.mval = r->cons.head.mval;
-		prod_tail.mval = r->prod.tail.mval;
+  switch (max) {
+    //case  4: quota_ptr = &quota_4;  break;
+    case  8 : quota_ptr = &quota_8;   break;
+    case 16 : quota_ptr = &quota_16;  break;
+    case 32 : quota_ptr = &quota_32;  break;
+    case 64 : quota_ptr = &quota_64;  break;
+    //case 128: quota_ptr = &quota_128; break;
+    default: return 0;
+  }
 
-		entries.mval = _mm_sub_epi32(prod_tail.mval, cons_head.mval);
-		if (entries.hiqw == 0 && entries.loqw == 0)
-			return 0;
 
-		n = entries.val[0] + entries.val[1] + entries.val[2] + entries.val[3];
-		if (n > max) {
-			union smultiint diff;
-			diff.mval = _mm_sub_epi32(entries.mval, quota.mval);
-			for (i = 0; i < NUM_PRIORITIES && n > max; i++) {
-				if (diff.val[i] > 0) {
-					const int delta = (n-max) < diff.val[i] \
-							? (n-max) : diff.val[i];
-					n -= delta, entries.val[i] -= delta;
-				}
-			}
-		}
+  do {
+    cons_head.mval = r->cons.head.mval;
+    prod_tail.mval = r->prod.tail.mval;
 
-		cons_next.mval = _mm_add_epi32(cons_head.mval, entries.mval);
+    entries.mval = _mm_sub_epi32(prod_tail.mval, cons_head.mval);
+    if (entries.hiqw == 0 && entries.loqw == 0)
+      return 0;
 
-		// atomically update the four head pointers in one operation
-		asm volatile ("lock cmpxchg16b %0; "
-				"setz %1"
-				: "+m" (r->cons.head), "=r" (success),
-				  "+d" (cons_head.loqw), "+a" (cons_head.hiqw)
-				: "c" (cons_next.loqw), "b" (cons_next.hiqw)
-				: "cc");
+    n = entries.val[0] + entries.val[1] + entries.val[2] + entries.val[3];
+    if (n > max) {
+      union smultiint diff;
+      diff.mval = _mm_sub_epi32(entries.mval, quota_ptr->mval);
+      for (i = 0; i < NUM_PRIORITIES && n > max; i++) {
+        if (diff.val[i] > 0) {
+          const int delta = (n-max) < diff.val[i] \
+              ? (n-max) : diff.val[i];
+          n -= delta, entries.val[i] -= delta;
+        }
+      }
+    }
 
-	} while (unlikely(success == 0));
+    cons_next.mval = _mm_add_epi32(cons_head.mval, entries.mval);
 
-	rte_rmb();
-	// for (i = 0; i < NUM_PRIORITIES; i++) {
-	for (i = (NUM_PRIORITIES-1); i >= 0; i--) {
+    // atomically update the four head pointers in one operation
+    asm volatile ("lock cmpxchg16b %0; "
+        "setz %1"
+        : "+m" (r->cons.head), "=r" (success),
+          "+d" (cons_head.loqw), "+a" (cons_head.hiqw)
+        : "c" (cons_next.loqw), "b" (cons_next.hiqw)
+        : "cc");
+
+  } while (unlikely(success == 0));
+
+  rte_rmb();
+  // for (i = 0; i < NUM_PRIORITIES; i++) {
+  for (i = (NUM_PRIORITIES-1); i >= 0; i--) {
 #ifdef mr_dbg_printf
-		mr_dbg_printf("Priority %d: %d, ", i, entries.val[i]);
+    mr_dbg_printf("Priority %d: %d, ", i, entries.val[i]);
 #endif
-		if (entries.val[i] == 0)
-			continue;
-		for (j = 0; j < entries.val[i]; j++)
-			obj_p[buf_idx++] = r->ring[i][(cons_head.val[i] + j) & RING_MASK];
-		while (unlikely(r->cons.tail.val[i] != cons_head.val[i]))
-			rte_pause();
-		r->cons.tail.val[i] = cons_next.val[i];
-	}
+    if (entries.val[i] == 0)
+      continue;
+    for (j = 0; j < entries.val[i]; j++)
+      obj_p[buf_idx++] = r->ring[i][(cons_head.val[i] + j) & RING_MASK];
+    while (unlikely(r->cons.tail.val[i] != cons_head.val[i]))
+      rte_pause();
+    r->cons.tail.val[i] = cons_next.val[i];
+  }
 #ifdef mr_dbg_printf
-	mr_dbg_printf("\n");
+  mr_dbg_printf("\n");
 #endif
 
-	return n;
+  return n;
 }
 
 /**
@@ -677,9 +690,9 @@ mring_dequeue_mp_burst(struct multiring *r, void **obj_p, const int max)
 static inline int
 mring_empty(struct multiring *r)
 {
-	union umultiint entries;
-	entries.mval = _mm_sub_epi32(r->prod.tail.mval, r->cons.head.mval);
-	return (entries.hiqw == 0 && entries.loqw == 0);
+  union umultiint entries;
+  entries.mval = _mm_sub_epi32(r->prod.tail.mval, r->cons.head.mval);
+  return (entries.hiqw == 0 && entries.loqw == 0);
 }
 
 

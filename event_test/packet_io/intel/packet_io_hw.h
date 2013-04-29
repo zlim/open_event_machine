@@ -28,6 +28,9 @@
 #ifndef PACKET_IO_HW_H
 #define PACKET_IO_HW_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +41,7 @@
 #include <sys/queue.h>
 #include <errno.h>
 
+#include <rte_config.h>
 #include <rte_log.h>
 #include <rte_memory.h>
 #include <rte_memzone.h>
@@ -63,6 +67,7 @@
 #include "misc_packet.h"
 #include "em_intel.h"
 #include "em_intel_packet.h"
+#include "intel_hw_init.h"
 
 
 
@@ -92,6 +97,35 @@ COMPILE_TIME_ASSERT(sizeof(struct udp_hdr)   == sizeof(udp_hdr_t), UDP_HDR_SIZE_
 /*
  * Functions
  */
+ 
+ 
+//static inline void* packet_io_buffer_ptr(const void* desc)
+//{
+//
+//}
+
+
+static inline void* packet_io_packet_ptr(const void* desc)
+{
+  return (void *) desc; // desc == event pointer == event
+}
+
+
+static inline uint32_t packet_io_buffer_size(const void* desc)
+{
+  return MBUF_SIZE;
+}
+
+
+/* similar to packet_io_get_frame_len(), arg type differs */
+static inline uint32_t packet_io_packet_size(const void* desc)
+{
+  // desc == event pointer == event
+  struct rte_mbuf *const m = (struct rte_mbuf *const) event_to_mbuf((em_event_t)desc);
+  
+  return rte_pktmbuf_data_len(m);
+}
+
 
 static inline void
 packet_io_send(em_event_t event, const int ipd_port)
@@ -298,6 +332,9 @@ packet_io_get_dst(em_event_t event, uint8_t *proto__out, uint32_t *ipv4_dst__out
 }
 
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PACKET_IO_HW_H
 

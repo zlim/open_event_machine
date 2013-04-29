@@ -272,14 +272,18 @@ typedef enum em_status_e
 
 /**
  * EM Internal Error scopes
+ * See event_machine_types.h for escope types etc.
  */
  
 /* First - for testing*/                                                         
 #define EM_ESCOPE_INTERNAL_TEST                   (EM_ESCOPE_INTERNAL_MASK | 0x0000)
-                                                  
+
+/* EM init escopes */
+#define EM_ESCOPE_INIT                            (EM_ESCOPE_INTERNAL_MASK | 0x0001)
+#define EM_ESCOPE_INIT_CORE                       (EM_ESCOPE_INTERNAL_MASK | 0x0002)
+                              
 /* EM-API escopes */
-// See event_machine_types.h
-                                                  
+
 /* EM-API Event Group escopes */                  
 #define EM_ESCOPE_EVENT_GROUP_DELETE              (EM_ESCOPE_INTERNAL_MASK | 0x0100)
 #define EM_ESCOPE_EVENT_GROUP_APPLY               (EM_ESCOPE_INTERNAL_MASK | 0x0101)
@@ -300,7 +304,7 @@ typedef enum em_status_e
 #define EM_ESCOPE_PACKETIO_ADD_IO_QUEUE           (EM_ESCOPE_INTERNAL_MASK | 0x0304)
 #define EM_ESCOPE_PACKETIO_REM_IO_QUEUE           (EM_ESCOPE_INTERNAL_MASK | 0x0305)
                                                   
-/* Other escopes */                               
+/* Other escopes - internal */                               
 #define EM_ESCOPE_INIT_GLOBAL                     (EM_ESCOPE_INTERNAL_MASK | 0x0400)
 #define EM_ESCOPE_EO_ALLOC                        (EM_ESCOPE_INTERNAL_MASK | 0x0401)
 #define EM_ESCOPE_QUEUE_ALLOC                     (EM_ESCOPE_INTERNAL_MASK | 0x0402)

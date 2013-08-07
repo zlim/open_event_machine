@@ -35,6 +35,9 @@
 
 #include "em_intel.h"
 
+#include "em_intel_inline.h"
+
+
 /*
  * Defines
  */
@@ -61,7 +64,7 @@ static void event_timer_callback(struct rte_timer *tim, void *arg);
 
 
 /*********************************************
- * Initialize once by one core at startup
+ * Initialize once per process at startup
  */
 int
 evt_timer_init_global(void)
@@ -77,7 +80,7 @@ evt_timer_init_global(void)
 
 
 /*********************************************
- * Each core runs once at startup after global init
+ * Each EM-core runs once at startup after global init
  */
 int
 evt_timer_init_local(void)
@@ -97,8 +100,9 @@ evt_timer_init_local(void)
   {
     printf("\n"
            "Event Timer: Local Init\n"
-           "HPET Hz:%"PRIu64" Core Hz:%"PRIu64"\n"
+           "Core Hz:%"PRIu64"\n"
          #ifdef RTE_LIBEAL_USE_HPET
+           "HPET Hz:%"PRIu64"\n" 
            "Core Hz/HPET Hz:%.10f\n"
          #else
            "Core Hz/HPET Hz:%.10f (HPET not used!)\n"
@@ -106,7 +110,10 @@ evt_timer_init_local(void)
            "Timer manage resolution:%ius (cycles:%"PRIu64")\n"
            "Timer tick resolution  :%"PRIu64"\n"
            ,
-           rte_get_hpet_hz(), env_core_hz(),
+           env_core_hz(),
+         #ifdef RTE_LIBEAL_USE_HPET
+           rte_get_hpet_hz(), 
+         #endif
            event_timer_local.core_hpet_hz,
            TIMER_RESOLUTION_us, event_timer_local.timer_manage_cycles,
            event_timer_local.timer_resolution
@@ -154,7 +161,14 @@ evt_request_timeout_func(evt_ticks_t ticks, em_event_t event, em_queue_t queue, 
   
   IF_UNLIKELY(ret != 0)
   {
-    printf("%s(): Error ret = %i\n", __func__, ret); abort();
+  #ifdef EVT_TIMER_DEBUG
+    fprintf(stderr, "%s() called from %s:L%i: Error ret = %i\n", __func__, file, line, ret);
+  #else
+    fprintf(stderr, "%s(): Error ret = %i\n", __func__, ret);
+  #endif
+    
+    // abort();
+    
     return EVT_TIMER_INVALID;
   } 
   

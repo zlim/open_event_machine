@@ -33,6 +33,7 @@
 PROJECT_ROOT      := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../..)
 EVENT_MACHINE_DIR := $(PROJECT_ROOT)/event_machine
 EVENT_TEST_DIR    := $(PROJECT_ROOT)/event_test
+TEST_COMMON_DIR   := $(EVENT_TEST_DIR)/common
 EXAMPLE_DIR       := $(EVENT_TEST_DIR)/example
 EM_LIB_BUILD_DIR  := $(EVENT_MACHINE_DIR)/intel
 EM_LIB_DIR        := $(EM_LIB_BUILD_DIR)/lib
@@ -86,6 +87,8 @@ CFLAGS += -DEM_64_BIT
 # EM include dirs
 CFLAGS += -I$(EVENT_MACHINE_DIR)
 CFLAGS += -I$(EVENT_MACHINE_DIR)/intel
+CFLAGS += -I$(TEST_COMMON_DIR)
+CFLAGS += -I$(TEST_COMMON_DIR)/intel
 CFLAGS += -I$(EXAMPLE_DIR)
 CFLAGS += -I$(EXAMPLE_DIR)/intel
 CFLAGS += -I$(PROJECT_ROOT)/misc
@@ -97,23 +100,24 @@ CFLAGS += -I$(PROJECT_ROOT)/misc/intel
 # Test Case Source Code
 #
 
-ALL_TEST_SRCS   =   
-ALL_TEST_SRCS  += $(EXAMPLE_DIR)/intel/example_main.c
+ALL_TEST_SRCS  =
+ALL_TEST_SRCS += $(EXAMPLE_DIR)/intel/example_main.c
+ALL_TEST_SRCS += $(TEST_COMMON_DIR)/intel/test_common.c
 
 ifeq ($(APPL),hello)
-ALL_TEST_SRCS  += $(EXAMPLE_DIR)/test_appl_hello.c
+ALL_TEST_SRCS += $(EXAMPLE_DIR)/test_appl_hello.c
 endif
 
 ifeq ($(APPL),perf)
-ALL_TEST_SRCS  += $(EXAMPLE_DIR)/test_appl_perf.c
+ALL_TEST_SRCS += $(EXAMPLE_DIR)/test_appl_perf.c
 endif
 
 ifeq ($(APPL),event_group)
-ALL_TEST_SRCS  += $(EXAMPLE_DIR)/test_appl_event_group.c
+ALL_TEST_SRCS += $(EXAMPLE_DIR)/test_appl_event_group.c
 endif
 
 ifeq ($(APPL),error)
-ALL_TEST_SRCS  += $(EXAMPLE_DIR)/test_appl_error.c
+ALL_TEST_SRCS += $(EXAMPLE_DIR)/test_appl_error.c
 endif
 
 
@@ -154,7 +158,7 @@ lib: $(EM_LIB)
 .PHONY: em_clean
 em_clean:
 	@$(MAKE) -f $(EVENT_MACHINE_DIR)/intel/em_intel_lib.mk S=$(EVENT_MACHINE_DIR)/intel O=$(EM_LIB_BUILD_DIR) M=em_intel_lib.mk real_clean
-	
+
 
 .PHONY: real_clean
 real_clean: clean

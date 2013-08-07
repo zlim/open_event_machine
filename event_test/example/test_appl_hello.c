@@ -66,7 +66,7 @@ typedef struct
 
 
 /**
- * EO context in hello world test
+ * EO context in the hello world test
  */
 typedef struct 
 {
@@ -79,9 +79,12 @@ typedef struct
   char         name[16];
   volatile int spins;
 
-}my_eo_context_t;
+} my_eo_context_t;
 
 
+/**
+ * Queue context data
+ */
 typedef struct
 {
   em_queue_t queue;
@@ -90,16 +93,36 @@ typedef struct
 
 
 
-// Allocate EO contexts from shared memory region
-ENV_SHARED static my_eo_context_t eo_context_a;
-ENV_SHARED static my_eo_context_t eo_context_b;
+/**
+ * Hello World shared memory 
+ */
+typedef union
+{
+  struct
+  {
+    // Allocate EO contexts from shared memory region
+    my_eo_context_t eo_context_a;
+    my_eo_context_t eo_context_b;
+    
+    // Queue context
+    my_queue_context_t queue_context_a;
+    my_queue_context_t queue_context_b;
+    
+    // EO A's queue
+    em_queue_t queue_a; 
+  };
+  
+  /** Pad to cache line size */
+  uint8_t u8[2*ENV_CACHE_LINE_SIZE];
+  
+} hello_shm_t;
 
-// Queue context
-ENV_SHARED static my_queue_context_t queue_context_a;
-ENV_SHARED static my_queue_context_t queue_context_b;
+COMPILE_TIME_ASSERT((sizeof(hello_shm_t) % ENV_CACHE_LINE_SIZE) == 0, HELLO_SHM_T__SIZE_ERROR);
 
-// EO A's queue
-ENV_SHARED static em_queue_t queue_a = EM_QUEUE_UNDEF;
+
+/** EM-core local pointer to shared memory */
+static ENV_LOCAL hello_shm_t *hello_shm = NULL;
+
 
 
 /* 
@@ -122,16 +145,29 @@ delay_spin(my_eo_context_t* eo_ctx);
 /**
  * Init and startup of the Hello World test application.
  *
- * @see main() and example_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(example_conf_t *const example_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t        eo_a, eo_b;
   
   
+  if(em_core_id() == 0) {
+    hello_shm = env_shared_reserve("HelloSharedMem", sizeof(hello_shm_t));
+  }
+  else {
+    hello_shm = env_shared_lookup("HelloSharedMem");
+  }
+  
+
+  if(hello_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), 0xdead, "Hello init failed on EM-core: %u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
@@ -146,20 +182,20 @@ test_init(example_conf_t *const example_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         example_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         example_conf->num_procs,
-         example_conf->num_threads);
+         appl_conf->num_procs,
+         appl_conf->num_threads);
   
   
 
-  memset(&eo_context_a, 0, sizeof(my_eo_context_t));
-  memset(&eo_context_b, 0, sizeof(my_eo_context_t));
+  memset(&hello_shm->eo_context_a, 0, sizeof(my_eo_context_t));
+  memset(&hello_shm->eo_context_b, 0, sizeof(my_eo_context_t));
 
-  memset(&queue_context_a, 0, sizeof(my_queue_context_t));
-  memset(&queue_context_b, 0, sizeof(my_queue_context_t));
+  memset(&hello_shm->queue_context_a, 0, sizeof(my_queue_context_t));
+  memset(&hello_shm->queue_context_b, 0, sizeof(my_queue_context_t));
 
 
   //
@@ -169,7 +205,7 @@ test_init(example_conf_t *const example_conf)
                       (em_start_func_t)  hello_start, NULL,
                       (em_stop_func_t)   hello_stop,  NULL, 
                       (em_receive_func_t)hello_receive_event, 
-                      &eo_context_a
+                      &hello_shm->eo_context_a
                      );
                      
   if(eo_a == EM_EO_UNDEF)
@@ -183,7 +219,7 @@ test_init(example_conf_t *const example_conf)
                       (em_start_func_t)  hello_start, NULL,
                       (em_stop_func_t)   hello_stop,  NULL, 
                       (em_receive_func_t)hello_receive_event, 
-                      &eo_context_b
+                      &hello_shm->eo_context_b
                      );
   
   if(eo_b == EM_EO_UNDEF)
@@ -194,13 +230,13 @@ test_init(example_conf_t *const example_conf)
 
 
   // Init EO contexts
-  eo_context_a.this_eo  = eo_a;
-  eo_context_a.other_eo = eo_b;
-  eo_context_a.is_a     = 1;
+  hello_shm->eo_context_a.this_eo  = eo_a;
+  hello_shm->eo_context_a.other_eo = eo_b;
+  hello_shm->eo_context_a.is_a     = 1;
 
-  eo_context_b.this_eo  = eo_b;
-  eo_context_b.other_eo = eo_a;
-  eo_context_b.is_a     = 0;
+  hello_shm->eo_context_b.this_eo  = eo_b;
+  hello_shm->eo_context_b.other_eo = eo_a;
+  hello_shm->eo_context_b.is_a     = 0;
 
   // Start EO A
   em_eo_start(eo_a, NULL, 0, NULL);
@@ -234,12 +270,12 @@ hello_start(my_eo_context_t* eo_ctx, em_eo_t eo)
   if(eo_ctx->is_a)
   {
     queue_name = "queue A";
-    q_ctx      = &queue_context_a;
+    q_ctx      = &hello_shm->queue_context_a;
   }
   else
   {
     queue_name = "queue B";
-    q_ctx      = &queue_context_b;
+    q_ctx      = &hello_shm->queue_context_b;
   }
 
 
@@ -287,7 +323,7 @@ hello_start(my_eo_context_t* eo_ctx, em_eo_t eo)
   if(eo_ctx->is_a)
   {
     // Save queue ID for EO B.
-    queue_a = queue;
+    hello_shm->queue_a = queue;
   }
   else
   {
@@ -311,11 +347,11 @@ hello_start(my_eo_context_t* eo_ctx, em_eo_t eo)
     hello->seq  = 0;
 
 
-    status = em_send(event, queue_a);
+    status = em_send(event, hello_shm->queue_a);
 
     if(status != EM_OK)
     {
-      printf("em_send() failed! status: %i,  eo: %"PRI_EO", queue: %"PRI_QUEUE" \n", status, eo, queue_a);
+      printf("em_send() failed! status: %i,  eo: %"PRI_EO", queue: %"PRI_QUEUE" \n", status, eo, hello_shm->queue_a);
       return EM_ERROR;
     }
     
@@ -360,6 +396,10 @@ hello_receive_event(my_eo_context_t* eo_ctx, em_event_t event, em_event_type_t t
   em_queue_t     dest;
   em_status_t    status;
 
+  
+  (void)type;
+  
+
   hello = em_event_pointer(event);
 
   dest        = hello->dest;
@@ -372,7 +412,7 @@ hello_receive_event(my_eo_context_t* eo_ctx, em_event_t event, em_event_type_t t
   status = em_send(event, dest);
   
   if(status != EM_OK) {
-    printf("em_send() failed! status: %i,  eo: %"PRI_EO", queue: %"PRI_QUEUE" \n", status, eo_ctx->this_eo, queue_a);
+    printf("em_send() failed! status: %i,  eo: %"PRI_EO", queue: %"PRI_QUEUE" \n", status, eo_ctx->this_eo, hello_shm->queue_a);
   }  
 
 }

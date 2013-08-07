@@ -44,11 +44,13 @@
 #include "misc_list.h"
 
 #include <rte_config.h>
-
+#include <semaphore.h>
 
 #ifdef EVENT_TIMER
   #include "event_timer.h"  
 #endif  
+
+
 
 
 #ifdef __cplusplus
@@ -56,9 +58,18 @@ extern "C" {
 #endif
 
 // Max number of EM cores supported
-#define MAX_CORES                    (RTE_MAX_LCORE)
+#define EM_MAX_CORES           (RTE_MAX_LCORE)
 // Keep smaller than 64 to fit in uint64_t core_mask
-COMPILE_TIME_ASSERT(MAX_CORES <= 64, TOO_MANY_CORES);
+COMPILE_TIME_ASSERT(EM_MAX_CORES <= 64, TOO_MANY_CORES);
+
+
+// EO pools
+#define FIRST_EO               (0)
+#define EO_POOLS               (32)
+#define EOS_PER_POOL           (EM_MAX_EOS / EO_POOLS)
+
+COMPILE_TIME_ASSERT(EM_MAX_EOS == (EOS_PER_POOL * EO_POOLS), EOS_PER_POOL__TRUNKATE_ERROR);
+
 
 
 /* Round up 'val' to next multiple of 'N' */
@@ -89,13 +100,13 @@ COMPILE_TIME_ASSERT(MAX_CORES <= 64, TOO_MANY_CORES);
 
 // A queue per core and a shared queue
 #define FIRST_INTERNAL_QUEUE           (EM_QUEUE_STATIC_MAX + 1)
-#define INTERNAL_QUEUES                (MAX_CORES + 1)
+#define INTERNAL_QUEUES                (EM_MAX_CORES + 1)
 #define LAST_INTERNAL_QUEUE            (FIRST_INTERNAL_QUEUE + INTERNAL_QUEUES - 1)
 #define SHARED_INTERNAL_QUEUE          (LAST_INTERNAL_QUEUE)
 // Priority for the EM-internal queues
 #define INTERNAL_QUEUE_PRIORITY        (EM_QUEUE_PRIO_LOWEST) // (EM_QUEUE_PRIO_HIGHEST)
 
-COMPILE_TIME_ASSERT(MAX_CORES <= (INTERNAL_QUEUES-1), TOO_FEW_INTERNAL_QUEUES_ERROR);
+COMPILE_TIME_ASSERT(EM_MAX_CORES <= (INTERNAL_QUEUES-1), TOO_FEW_INTERNAL_QUEUES_ERROR);
 
 // Dynamic queue ids
 #define FIRST_DYN_QUEUE        ROUND_UP(LAST_INTERNAL_QUEUE + 1, 32) // Keep divisible by 32
@@ -118,22 +129,47 @@ COMPILE_TIME_ASSERT(POWEROF2(STATIC_QUEUE_LOCKS), STATIC_QUEUE_LOCKS__NOT_POWER_
  */
 #define invalid_queue(queue)   (ENV_UNLIKELY((queue) >= EM_MAX_QUEUES))
 
-#define invalid_q_elem(q_elem) (ENV_UNLIKELY( (((uint64_t)(q_elem)) < ((uint64_t)&em_queue_element_tbl[0])) \
-                                           || (((uint64_t)(q_elem)) > ((uint64_t)&em_queue_element_tbl[EM_MAX_QUEUES-1])) ))
+#define invalid_q_elem(q_elem) (ENV_UNLIKELY( (((uint64_t)(q_elem)) < ((uint64_t)&em.shm->em_queue_element_tbl[0])) \
+                                           || (((uint64_t)(q_elem)) > ((uint64_t)&em.shm->em_queue_element_tbl[EM_MAX_QUEUES-1])) ))
 
 #define invalid_eo(eo)         (ENV_UNLIKELY((eo) >= EM_MAX_EOS))
 
 
 
-
 /**
- * EM internal run-time configuration options stored at startup
+ * EM internal shared run-time configuration
+ *
+ * @note one per EM-instance (i.e. shared by all EM processes and threads)
  */
 typedef union
 {
   struct
   {
-    em_conf_t conf; /**< Copy of config as given to em_init() */
+    int em_instance_id; /**< Event Machine Instance Id */
+    
+    env_barrier_t barrier;
+    
+    /* Add further internal config */
+  };
+  
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  
+} em_shared_conf_t;
+
+
+
+/**
+ * EM internal run-time configuration options stored at startup
+ *
+ * @note one per process
+ */
+typedef union
+{
+  struct
+  {
+    em_shared_conf_t    *shared; /**< Ptr to the EM master conf - shared by all procs&threads in the EM instance */    
+    
+    em_conf_t            conf;        /**< Copy of config as given to em_init() */
     
     /* Add further internal config */
   };
@@ -142,8 +178,7 @@ typedef union
   
 } em_internal_conf_t;
 
-
-extern ENV_SHARED  em_internal_conf_t  em_internal_conf  ENV_CACHE_LINE_ALIGNED;
+COMPILE_TIME_ASSERT(sizeof(em_internal_conf_t) == ENV_CACHE_LINE_SIZE, EM_INTERNAL_CONF_T__SIZE_ERROR);
 
 
 
@@ -348,6 +383,7 @@ COMPILE_TIME_ASSERT(sizeof(em_event_hdr_t) == RTE_PKTMBUF_HEADROOM, EM_EVENT_HDR
 
 
 
+#if 0
 typedef union em_event_pool_u
 {
   void*    pool;
@@ -356,6 +392,56 @@ typedef union em_event_pool_u
   
 } em_event_pool_t;
 
+COMPILE_TIME_ASSERT(sizeof(em_event_pool_t) == ENV_CACHE_LINE_SIZE, EM_EVENT_POOL_T__SIZE_ERROR);
+#else
+typedef void* em_event_pool_t;
+#endif
+
+
+typedef union
+{
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+
+  struct
+  {
+    env_spinlock_t  lock;
+    m_list_head_t   list_head;
+  };
+
+} em_pool_t  ENV_CACHE_LINE_ALIGNED;
+
+COMPILE_TIME_ASSERT(sizeof(em_pool_t) == ENV_CACHE_LINE_SIZE, EM_POOL_T__SIZE_ERROR);
+
+
+
+// Number of EM cores
+typedef union
+{
+
+  struct
+  {
+    int count;
+
+    // From physical cores ids to logical EM core ids
+    uint8_t logic[EM_MAX_CORES];
+
+    // From logical EM core ids to physical core ids
+    uint8_t phys[EM_MAX_CORES];
+
+
+    // Mask of logic core IDs
+    em_core_mask_t logic_mask;
+
+    // Mask of phys core IDs
+    em_core_mask_t phys_mask;
+  };
+
+
+  uint8_t u8[2 * ENV_CACHE_LINE_SIZE];
+
+} em_core_map_t;
+
+COMPILE_TIME_ASSERT((sizeof(em_core_map_t) % ENV_CACHE_LINE_SIZE) == 0, EM_CORE_MAP_T__SIZE_ERROR);
 
 
 
@@ -397,21 +483,6 @@ typedef union
 COMPILE_TIME_ASSERT((sizeof(em_core_local_t) % ENV_CACHE_LINE_SIZE) == 0, EM_CORE_LOCAL_DATA_SIZE_ERROR);  
 
 
-/**
- * EM barrier
- */
-typedef union
-{
-  // Barrier
-  env_barrier_t barrier  ENV_CACHE_LINE_ALIGNED;
-  
-  // Cache line size pad
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
-  
-} em_barrier_t;
-
-COMPILE_TIME_ASSERT(sizeof(em_barrier_t) == ENV_CACHE_LINE_SIZE, EM_BARRIER_SIZE_ERROR);
-
 
 /**
  * EM spinlock - Cache line sized & aligned
@@ -431,21 +502,37 @@ COMPILE_TIME_ASSERT(sizeof(em_spinlock_t) == ENV_CACHE_LINE_SIZE, EM_STATIC_QUEU
 
 
 
+/**
+ * Queues/rings containing free rte_rings for em_queue_create()/queue_init() to
+ * use as q_elem->rte_rings for atomic and parallel-ordered EM queues.
+ * Parallel EM queues do not require EM queue specific rings - all events are 
+ * handled directly through the scheduling queues.
+ */
+typedef union
+{
+  struct
+  {
+    struct rte_ring *atomic_rings;
+    struct rte_ring *parallel_ord_rings;
+  };
+  
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  
+} queue_init_rings_t;
+
+
 
 /*
  * Externs
  */
-extern ENV_SHARED  em_queue_element_t  em_queue_element_tbl[EM_MAX_QUEUES];
-extern ENV_SHARED  em_eo_element_t     em_eo_element_tbl[EM_MAX_EOS];
-extern ENV_SHARED  em_event_pool_t     em_event_pool;
-extern ENV_SHARED  em_barrier_t        em_barrier;
-extern ENV_LOCAL   em_core_local_t     em_core_local;
+extern ENV_LOCAL  em_core_local_t     em_core_local;
+extern            em_internal_conf_t  em_internal_conf;  
+
 
 
 /*
  * Functions
  */
-
 
 /**
  * Global initialization of EM internals. Only one core calls this function once.
@@ -468,121 +555,6 @@ em_status_t
 em_init_local(const em_internal_conf_t *const em_internal_conf);
 
 
-
-static inline em_queue_element_t*
-m_list_node_to_queue_elem(m_list_head_t* list_node)
-{
-  em_queue_element_t *const q_elem = (em_queue_element_t*) (((uint64_t)list_node) - offsetof(em_queue_element_t, list_node));
-  
-  return (likely(list_node != NULL) ? q_elem : NULL);
-}
-
-
-static inline em_queue_element_t*
-m_list_qgrp_node_to_queue_elem(m_list_head_t* qgrp_node)
-{
-  em_queue_element_t *const q_elem = (em_queue_element_t*) (((uint64_t)qgrp_node) - offsetof(em_queue_element_t, qgrp_node));
-  
-  return (likely(qgrp_node != NULL) ? q_elem : NULL);
-}
-
-
-static inline em_eo_element_t*
-m_list_head_to_eo_elem(m_list_head_t* list_head)
-{
-  return (em_eo_element_t*) list_head;
-}
-// Verify that the function above returns the correct pointer
-COMPILE_TIME_ASSERT(offsetof(em_eo_element_t, list_head) == 0, EM_EO_ELEMENT_T__LIST_HEAD_OFFSET_ERROR);
-
-
-
-static inline em_event_hdr_t*
-event_to_event_hdr(em_event_t event)
-{
-  return (em_event_hdr_t *) (((uint8_t *) event) - RTE_PKTMBUF_HEADROOM);
-}
-
-
-static inline em_event_t
-event_hdr_to_event(em_event_hdr_t* event_hdr)
-{
-  return (em_event_t) (((uint8_t *) event_hdr) + RTE_PKTMBUF_HEADROOM);
-}
-
-
-
-static inline em_event_hdr_t*
-mbuf_to_event_hdr(struct rte_mbuf *const mbuf)
-{
-  return (em_event_hdr_t *) &mbuf[1];
-}
-
-static inline struct rte_mbuf*
-event_hdr_to_mbuf(em_event_hdr_t *const ev_hdr)
-{
-  return (struct rte_mbuf *) (((size_t) ev_hdr) - sizeof(struct rte_mbuf));
-}
-
-
-
-static inline em_event_t
-mbuf_to_event(struct rte_mbuf *const mbuf)
-{
-  return (em_event_t) mbuf->pkt.data;
-}
-
-static inline struct rte_mbuf*
-event_to_mbuf(em_event_t event)
-{
-  return (struct rte_mbuf *) (((size_t) event) - (RTE_PKTMBUF_HEADROOM+sizeof(struct rte_mbuf)));
-}
-
-
-
-
-static inline em_queue_element_t*
-get_queue_element(const em_queue_t queue)
-{
-  IF_LIKELY(queue < EM_MAX_QUEUES) {
-    return &em_queue_element_tbl[queue];
-  }
-  else {
-    return NULL;
-  }
-}
-
-
-
-static inline
-em_eo_element_t*
-get_eo_element(const em_eo_t eo)
-{
-  IF_LIKELY(eo < EM_MAX_EOS) {
-    return &em_eo_element_tbl[eo];
-  }
-  else {
-    return NULL;
-  }
-}
-
-
-
-static inline
-em_eo_element_t*
-get_current_eo_elem(void)
-{
-
-  IF_LIKELY(em_core_local.current_q_elem != NULL) {
-    return em_core_local.current_q_elem->eo_elem;
-  }
-  else {
-    return NULL;
-  }
-}
-
-
-
 void
 queue_init(const char*      name,
            em_queue_t       queue,
@@ -599,4 +571,4 @@ void em_print_info(void);
 }
 #endif
 
-#endif  // EM_OCTEON_H_
+#endif  // EM_INTEL_H_

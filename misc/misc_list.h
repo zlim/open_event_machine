@@ -103,6 +103,9 @@ m_list_rem(m_list_head_t *const list_head, m_list_head_t *const node)
   m_list_head_t* next;
   m_list_head_t* prev;
 
+  
+  (void) list_head;  // unused
+
   next = node->next;
   prev = node->prev;
 

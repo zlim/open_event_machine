@@ -24,202 +24,180 @@
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
- 
- 
+
+
 /**
  * @file
  *
  * Event Machine Example initialization
  *
  */
- 
+
 #include "event_machine.h"
 #include "environment.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <signal.h>
+#include <sys/prctl.h>
+
 
 #include "example.h"
+#include "test_common.h"
 
 
 
-/**
- * Local Function Prototypes
+
+/*
+ * Local function prototypes
+ */
+static int
+application_start(appl_conf_t *appl_conf);
+
+
+/*
+ * Functions
  */
 
-static int
-example_start(example_conf_t *example_conf);
-
-static void
-parse_args(int argc, char *argv[],
-           em_conf_t      *em_conf      /* out param */,
-           example_conf_t *example_conf /* out param */);
-
-
-
-
 /**
- * Example main function
- * 
+ * Main function
+ *
  * Intel+DPDK specific - modify for other target envs
  *
- * Initialize the example application/env, create processes/threads for EM and launch the 
+ * Initialize the example application/env, create processes/threads for EM and launch the
  * EM-core specific init on each EM-core.
  */
 int
 main(int argc, char *argv[])
 {
-  int            ret;
-  unsigned       lcore_id;
-  em_status_t    em_status;
-  em_conf_t      em_conf;
-  example_conf_t example_conf;
+  em_conf_t    em_conf;
+  appl_conf_t  appl_conf;
+  em_status_t  em_status;
+  int          ret;
 
 
   /*
-   * Initialize the environment - here DPDK.
-   */  
-  ret = rte_eal_init(argc, argv);
-  if(ret < 0) {
-    rte_panic("Cannot init the Intel DPDK EAL\n");
-  }
-  argc -= ret;
-  argv += ret;
-  
-
-  /*
-   * Parse command line arguments & set config options 
+   * Parse command line arguments & set config options
    * for both application and EM
    */
-  (void) memset(&em_conf,      0, sizeof(em_conf));
-  (void) memset(&example_conf, 0, sizeof(example_conf));
-     
-  parse_args(argc, argv, &em_conf, &example_conf);
+  (void) memset(&em_conf,   0, sizeof(em_conf));
+  (void) memset(&appl_conf, 0, sizeof(appl_conf));
 
+  parse_args(argc, argv, &em_conf, &appl_conf);
+
+
+
+  /*
+   * Set application specific EM-config
+   */
+  em_conf.pkt_io    = 0; // Packet-I/O:  disable=0, enable=1
+  em_conf.evt_timer = 0; // Event-Timer: disable=0, enable=1  
+
+
+
+  /*
+   * Initialize the run-time environment.
+   * EM process-per-core mode: Initialize the parent process before forking children.
+   *                           Each EM-core is run in a separate process.
+   * EM thread-per-core  mode: Initialze and create threads.
+   *                           Each EM-core is run in a separate thread of the same process.
+   */
+  ret = init_rt_env(argc, argv, &em_conf, &appl_conf);
+  if(ret < 0) {
+    APPL_EXIT_FAILURE("init_rt_env() fails! ret=%i", ret);
+  }
+  
+  
   
   /*
-   * Initialize the Event Machine
+   * Initialize the Event Machine - called once per process
    */
   em_status = em_init(&em_conf);
   if(em_status != EM_OK) {
-    rte_panic("Cannot init the Event Machine!\n");
+    APPL_EXIT_FAILURE("Cannot init the Event Machine!");
   }
-  
-  
+
+
+
   /*
-   * Launch example on each core/thread
-   */ 
-  RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-    rte_eal_remote_launch((int (*)(void *))example_start, &example_conf, lcore_id);
-  }     
-  /* call also on master lcore */
-  (void) example_start(&example_conf);
- 
- 
-  rte_panic("Never reached...\n");
-  
+   * Launch example on each EM core/thread
+   */
+  launch_application(application_start, &appl_conf);
+  /* Never return */
+
+
+  APPL_EXIT_FAILURE("Never reached...");
+
   return 0;
 }
 
 
 
 /**
- * Example entry on each EM-core
+ * Application entry on each EM-core
  *
  * Application setup (test_init()) and event dispatch loop run by each EM-core.
  * A call to em_init_core() MUST be made on each EM-core before using other EM API
  * functions to create EOs, queues etc. or calling em_dispatch().
  *
- * @param example_conf  Example application configuration
+ * @param appl_conf  Application configuration
  */
 static int
-example_start(example_conf_t *example_conf)
+application_start(appl_conf_t *appl_conf)
 {
   em_status_t em_status;
-  
-  
+
+
   /*
    * Initialize this thread of execution (proc, thread or baremetal-core)
    */
   em_status = em_init_core();
   if(em_status != EM_OK)
   {
-    printf("em_init_core() fails with status=%u on EM-core %i\n", em_status, em_core_id());
-    exit(1);
+    APPL_EXIT_FAILURE("em_init_core() fails with status=0x%"PRIx32" on EM-core %i\n",
+                 em_status, em_core_id());
   }
-  
-  
-  /* 
+
+
+  /*
    * EM is ready on this EM-core (= proc, thread or core)
    * It is now OK to start creating EOs, queues etc.
    *
-   * Note that only one core needs to create the EO's, queues etc. needed by the application,
-   * all other cores go directly into the em_dispatch()-loop, where they are ready to
-   * process events as soon as the EOs have been started and queues enabled.
+   * Note that only one core needs to create the shared memory, EO's, queues etc. needed by the application,
+   * all other cores need only look up the shared mem and go directly into the em_dispatch()-loop,
+   * where they are ready to process events as soon as the EOs have been started and queues enabled.
    */
   if(em_core_id() == 0)
   {
-    /* All examples implement test_init() to create the EM application */
-    test_init(example_conf);
+    test_init(appl_conf);
   }
-  
-  
+
+  pthread_barrier_wait(&appl_conf->startup_sync->barrier);
+
+  if(em_core_id() != 0)
+  {
+    test_init(appl_conf);
+  }
+
+
   /*
    * Enter the EM event dispatch loop (0=ForEver) on this EM-core.
    */
-  printf("Entering event dispatch loop() on EM-core %i\n", em_core_id());
-  
+  printf("Entering the event dispatch loop() on EM-core %i\n", em_core_id());
+
   for(;;) {
     em_dispatch(0);
   }
- 
-  
+
+
   /* Never reached */
   return 0;
 }
 
 
 
-/** 
- * Parse and store relevant command line arguments. Set config options for both
- * application and EM.
- * 
- * EM options are stored into em_conf and application specific options into appl_conf.
- * Note that both application and EM parsing is done here since EM should not, by design,
- * be concerned with the parsing of options, instead em_conf_t specifies the options
- * needed by the EM-implementation (HW, device and env specific).
- *
- * @param argc       Command line argument count
- * @param argv[]     Command line arguments
- * @param em_conf    EM config options parsed from argv[]
- * @param example_conf  Application config options parsed from argv[]
- */
-static void
-parse_args(int argc, char *argv[],
-           em_conf_t      *em_conf      /* out param */,
-           example_conf_t *example_conf /* out param */)
-{
-  /*
-   * Set application specific config
-   */
-  if(argc > 0)
-  {
-    (void) strncpy(example_conf->name, NO_PATH(argv[0]), EXAMPLE_NAME_LEN);
-    example_conf->name[EXAMPLE_NAME_LEN-1] = '\0'; // always '\0'-terminate string
-  }
-
-  example_conf->num_procs   = 1;
-  example_conf->num_threads = env_get_core_count(); // Cannot use em_core_count() since em_init() has not been called yet!
-  
-  
-  /*
-   * Set application specific EM-config
-   */
-  em_conf->em_instance_id = 0; // Currently only support one (1) EM-instance
-  em_conf->pkt_io         = 0; // Packet-I/O:  disable=0, enable=1 
-  em_conf->evt_timer      = 0; // Event-Timer: disable=0, enable=1 
-  
-  
-  // No other command line arguments to be parsed
-}

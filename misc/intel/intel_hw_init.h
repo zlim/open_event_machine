@@ -56,8 +56,11 @@ COMPILE_TIME_ASSERT((NB_MBUF % MBUF_CACHE_SIZE) == 0, CONFIGURED_MEMPOOL_CACHE_E
 
 
 
+void *                
+intel_pool_init(const char *name);
+
 void *
-intel_pool_init(void);
+intel_pool_lookup(const char *name);
 
 
 

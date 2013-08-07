@@ -33,6 +33,7 @@
 PROJECT_ROOT      := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../..)
 EVENT_MACHINE_DIR := $(PROJECT_ROOT)/event_machine
 EVENT_TEST_DIR    := $(PROJECT_ROOT)/event_test
+TEST_COMMON_DIR   := $(EVENT_TEST_DIR)/common
 PACKET_IO_DIR     := $(EVENT_TEST_DIR)/packet_io
 EM_LIB_BUILD_DIR  := $(EVENT_MACHINE_DIR)/intel
 EM_LIB_DIR        := $(EM_LIB_BUILD_DIR)/lib
@@ -46,8 +47,8 @@ APPL ?= packet_loopback
 
 # binary name required by the DPDK build system
 APP    = $(APPL)
-#
-SRCS-y =
+# 
+SRCS-y = 
 
 
 
@@ -86,6 +87,8 @@ CFLAGS += -DEM_64_BIT
 # EM include dirs
 CFLAGS += -I$(EVENT_MACHINE_DIR)
 CFLAGS += -I$(EVENT_MACHINE_DIR)/intel
+CFLAGS += -I$(TEST_COMMON_DIR)
+CFLAGS += -I$(TEST_COMMON_DIR)/intel
 CFLAGS += -I$(PACKET_IO_DIR)
 CFLAGS += -I$(PACKET_IO_DIR)/intel
 CFLAGS += -I$(PROJECT_ROOT)/misc
@@ -99,6 +102,7 @@ CFLAGS += -I$(PROJECT_ROOT)/misc/intel
 
 ALL_TEST_SRCS  =
 ALL_TEST_SRCS += $(PACKET_IO_DIR)/intel/packet_io_main.c
+ALL_TEST_SRCS += $(TEST_COMMON_DIR)/intel/test_common.c
 
 
 ifeq ($(APPL),packet_loopback)
@@ -123,7 +127,7 @@ EXTRA_LDFLAGS += -L$(PACKET_IO_DIR)/intel
 EXTRA_LDFLAGS += -L$(EM_LIB_DIR)
 EXTRA_LDFLAGS += --start-group -lem --end-group
 
-.PHONY: appl
+.PHONY: appl 
 appl: all $(APP) $(EM_LIB)
 
 $(APP): $(EM_LIB) # put dependency so that things build in right order

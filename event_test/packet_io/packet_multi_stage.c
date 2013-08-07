@@ -143,12 +143,13 @@
  * Macros
  */
 
-#define ERROR_PRINT(...)     {printf("ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
-                              printf(__VA_ARGS__); fflush(NULL); abort();}
+#define ERROR_PRINT(...)     {fprintf(stderr, "ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
+                              fprintf(stderr, __VA_ARGS__); fflush(stderr);}
 
 #define IS_ERROR(cond, ...)   \
   if(ENV_UNLIKELY(cond)) {    \
     ERROR_PRINT(__VA_ARGS__); \
+    abort();                  \
   }
 
 #define IS_ODD(x)   (((x) & 0x1))
@@ -235,17 +236,27 @@ typedef struct
 
 
 
-
 /**
- * Global Variables
+ * Packet Multi-Stage shared memory 
  */
-ENV_SHARED static  eo_context_t  EO_ctx[PROCESSING_STAGES] ENV_CACHE_LINE_ALIGNED;
-                                       
-ENV_SHARED static  queue_context_t  EO_q_ctx_1st[NUM_FLOWS]   ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED static  queue_context_t  EO_q_ctx_2nd[NUM_FLOWS]   ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED static  queue_context_t  EO_q_ctx_3rd[NUM_FLOWS]   ENV_CACHE_LINE_ALIGNED;
+typedef struct
+{
+  eo_context_t        EO_ctx[PROCESSING_STAGES]                    ENV_CACHE_LINE_ALIGNED;
+  
+  queue_context_t     EO_q_ctx_1st[NUM_FLOWS]                      ENV_CACHE_LINE_ALIGNED;
+  queue_context_t     EO_q_ctx_2nd[NUM_FLOWS]                      ENV_CACHE_LINE_ALIGNED;
+  queue_context_t     EO_q_ctx_3rd[NUM_FLOWS]                      ENV_CACHE_LINE_ALIGNED;
+  
+  queue_type_tuple_t  q_type_permutations[QUEUE_TYPE_PERMUTATIONS] ENV_CACHE_LINE_ALIGNED;
+  
+} packet_multi_stage_shm_t;
 
-ENV_SHARED static  queue_type_tuple_t  q_type_permutations[QUEUE_TYPE_PERMUTATIONS] ENV_CACHE_LINE_ALIGNED;
+COMPILE_TIME_ASSERT((sizeof(packet_multi_stage_shm_t) % ENV_CACHE_LINE_SIZE) == 0, PACKET_MULTI_STAGE_SHM_T__SIZE_ERROR);
+
+
+/** EM-core local pointer to shared memory */
+static ENV_LOCAL packet_multi_stage_shm_t *pkt_shm = NULL;
+
 
 
 
@@ -285,10 +296,10 @@ static em_event_t alloc_copy_free(em_event_t event);
 /**
  * Init and startup of the Packet Multi-stage test application.
  *
- * @see main() and packet_io_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(packet_io_conf_t *const packet_io_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t             eo_1st, eo_2nd, eo_3rd;
   em_queue_t          default_queue;
@@ -301,8 +312,21 @@ test_init(packet_io_conf_t *const packet_io_conf)
   int                 i, j;
   
   
+  if(em_core_id() == 0) {
+    pkt_shm = env_shared_reserve("PktMStageShMem", sizeof(packet_multi_stage_shm_t));
+  }
+  else {
+    pkt_shm = env_shared_lookup("PktMStageShMem");
+  }
+  
+
+  if(pkt_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), 0xdead, "Packet Multi-Stage init failed on EM-core: %u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
@@ -317,12 +341,12 @@ test_init(packet_io_conf_t *const packet_io_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         packet_io_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         packet_io_conf->num_procs,
-         packet_io_conf->num_threads);
+         appl_conf->num_procs,
+         appl_conf->num_threads);
 
   
 #if 1 // Use different prios for the queues
@@ -343,10 +367,10 @@ test_init(packet_io_conf_t *const packet_io_conf)
   //
   // Create EOs, 3 stages of processing for each flow
   //
-  (void) memset(EO_ctx, 0, sizeof(EO_ctx));
-  eo_1st = em_eo_create("packet_mstage_1st", start, start_local, stop, stop_local, receive_packet_1st, &EO_ctx[0]);
-  eo_2nd = em_eo_create("packet_mstage_2nd", start, start_local, stop, stop_local, receive_packet_2nd, &EO_ctx[1]);
-  eo_3rd = em_eo_create("packet_mstage_3rd", start, start_local, stop, stop_local, receive_packet_3rd, &EO_ctx[2]);
+  (void) memset(pkt_shm->EO_ctx, 0, sizeof(pkt_shm->EO_ctx));
+  eo_1st = em_eo_create("packet_mstage_1st", start, start_local, stop, stop_local, receive_packet_1st, &pkt_shm->EO_ctx[0]);
+  eo_2nd = em_eo_create("packet_mstage_2nd", start, start_local, stop, stop_local, receive_packet_2nd, &pkt_shm->EO_ctx[1]);
+  eo_3rd = em_eo_create("packet_mstage_3rd", start, start_local, stop, stop_local, receive_packet_3rd, &pkt_shm->EO_ctx[2]);
 
 
 
@@ -358,7 +382,7 @@ test_init(packet_io_conf_t *const packet_io_conf)
   IS_ERROR(default_queue == EM_QUEUE_UNDEF, "Default Queue creation failed!\n");
   
   // Store the default queue Id on the EO-context data
-  EO_ctx[0].default_queue = default_queue;
+  pkt_shm->EO_ctx[0].default_queue = default_queue;
   
   // Associate the queue with EO 1
   ret = em_eo_add_queue(eo_1st, default_queue);
@@ -373,9 +397,9 @@ test_init(packet_io_conf_t *const packet_io_conf)
 
 
    // Zero the Queue context arrays
-  (void) memset(EO_q_ctx_1st, 0, sizeof(EO_q_ctx_1st));
-  (void) memset(EO_q_ctx_2nd, 0, sizeof(EO_q_ctx_2nd));
-  (void) memset(EO_q_ctx_3rd, 0, sizeof(EO_q_ctx_3rd));
+  (void) memset(pkt_shm->EO_q_ctx_1st, 0, sizeof(pkt_shm->EO_q_ctx_1st));
+  (void) memset(pkt_shm->EO_q_ctx_2nd, 0, sizeof(pkt_shm->EO_q_ctx_2nd));
+  (void) memset(pkt_shm->EO_q_ctx_3rd, 0, sizeof(pkt_shm->EO_q_ctx_3rd));
 
 
   /*
@@ -423,7 +447,7 @@ test_init(packet_io_conf_t *const packet_io_conf)
       ret = em_eo_add_queue(eo_1st, queue_1st);
       IS_ERROR(ret != EM_OK, "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo_1st, queue_1st);
       
-      q_ctx_1st = &EO_q_ctx_1st[q_ctx_idx];
+      q_ctx_1st = &pkt_shm->EO_q_ctx_1st[q_ctx_idx];
       ret       = em_queue_set_context(queue_1st, q_ctx_1st);
       IS_ERROR(ret != EM_OK, "EO Queue context assignment failed (%i). EO-ctx: %d, queue: %"PRI_QUEUE"\n", ret, q_ctx_idx, queue_1st);
       
@@ -467,7 +491,7 @@ test_init(packet_io_conf_t *const packet_io_conf)
       ret = em_eo_add_queue(eo_2nd, queue_2nd);
       IS_ERROR(ret != EM_OK, "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo_2nd, queue_2nd);
       
-      q_ctx_2nd = &EO_q_ctx_2nd[q_ctx_idx];
+      q_ctx_2nd = &pkt_shm->EO_q_ctx_2nd[q_ctx_idx];
       ret       = em_queue_set_context(queue_2nd, q_ctx_2nd);
       IS_ERROR(ret != EM_OK, "EO Queue context assignment failed (%i). EO-ctx: %d, queue: %"PRI_QUEUE"\n", ret, q_ctx_idx, queue_2nd);
       
@@ -494,7 +518,7 @@ test_init(packet_io_conf_t *const packet_io_conf)
       ret = em_eo_add_queue(eo_3rd, queue_3rd);
       IS_ERROR(ret != EM_OK, "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo_3rd, queue_3rd);
       
-      q_ctx_3rd = &EO_q_ctx_3rd[q_ctx_idx];
+      q_ctx_3rd = &pkt_shm->EO_q_ctx_3rd[q_ctx_idx];
       ret       = em_queue_set_context(queue_3rd, q_ctx_3rd);
       IS_ERROR(ret != EM_OK, "EO Queue context assignment failed (%i). EO-ctx: %d, queue: %"PRI_QUEUE"\n", ret, q_ctx_idx, queue_3rd);
       
@@ -841,12 +865,12 @@ get_queue_type_tuple(int cnt)
 #if QUEUE_TYPE_MIX == 0
   
   // Always return the same kind of Queue types
-  return &q_type_permutations[0];
+  return &pkt_shm->q_type_permutations[0];
 
 #else
   
   // Spread out over the 3 different queue-types
-  return &q_type_permutations[cnt%(QUEUE_TYPE_PERMUTATIONS)];
+  return &pkt_shm->q_type_permutations[cnt%(QUEUE_TYPE_PERMUTATIONS)];
   
 #endif
 }
@@ -865,9 +889,9 @@ fill_q_type_permutations(void)
 #if QUEUE_TYPE_MIX == 0
   
   // Use the same type of queues everywhere.
-  q_type_permutations[0].queue_type_1st = QUEUE_TYPE;
-  q_type_permutations[0].queue_type_2nd = QUEUE_TYPE;
-  q_type_permutations[0].queue_type_3rd = QUEUE_TYPE;
+  pkt_shm->q_type_permutations[0].queue_type_1st = QUEUE_TYPE;
+  pkt_shm->q_type_permutations[0].queue_type_2nd = QUEUE_TYPE;
+  pkt_shm->q_type_permutations[0].queue_type_3rd = QUEUE_TYPE;
 
 #else
 
@@ -886,9 +910,9 @@ fill_q_type_permutations(void)
         queue_type_2nd = queue_types(j);
         queue_type_3rd = queue_types(k);
         
-        q_type_permutations[nbr_q].queue_type_1st = queue_type_1st;
-        q_type_permutations[nbr_q].queue_type_2nd = queue_type_2nd;
-        q_type_permutations[nbr_q].queue_type_3rd = queue_type_3rd;
+        pkt_shm->q_type_permutations[nbr_q].queue_type_1st = queue_type_1st;
+        pkt_shm->q_type_permutations[nbr_q].queue_type_2nd = queue_type_2nd;
+        pkt_shm->q_type_permutations[nbr_q].queue_type_3rd = queue_type_3rd;
       }
     }
   }

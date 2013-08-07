@@ -53,7 +53,6 @@
 #include "em_error.h"
 
 #include "intel_hw_init.h"
-#include "intel_alloc.h"
 
 #ifdef EVENT_PACKET
   #include "em_intel_packet.h"
@@ -63,23 +62,18 @@
   #include "event_timer.h"
 #endif
 
+#include "em_shared_data.h"
+
+#include "em_intel_inline.h"
+
 
 
 /*
  * Defines
  */
-
-
-// EO pools
-#define FIRST_EO               (0)
-#define EO_POOLS               (32)
-#define EOS_PER_POOL           (EM_MAX_EOS / EO_POOLS)
-
-COMPILE_TIME_ASSERT(EM_MAX_EOS == (EOS_PER_POOL * EO_POOLS), EOS_PER_POOL__TRUNKATE_ERROR);
-
-
+ 
 #define EM_Q_BASENAME          "EM_Q_"
-
+#define EM_EVENT_POOL_NAME     "EM-EventPool"
 
 
 /*
@@ -92,87 +86,17 @@ COMPILE_TIME_ASSERT(EM_MAX_EOS == (EOS_PER_POOL * EO_POOLS), EOS_PER_POOL__TRUNK
  * Data Types
  */
 
-typedef union
-{
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
-
-  struct
-  {
-    env_spinlock_t  lock;
-    m_list_head_t   list_head;
-  };
-
-} em_pool_t  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT(sizeof(em_pool_t) == ENV_CACHE_LINE_SIZE, EM_POOL_T__SIZE_ERROR);
-
-
 
 
 /*
- * Global variables
+ * Vars
+ */ 
+
+
+/**
+ * EM data
  */
-
-// EO table
-ENV_SHARED  em_eo_element_t  em_eo_element_tbl[EM_MAX_EOS]  ENV_CACHE_LINE_ALIGNED;
-COMPILE_TIME_ASSERT((sizeof(em_eo_element_tbl) % ENV_CACHE_LINE_SIZE) == 0, EM_EO_ELEMENT_TABLE_SIZE_ERROR);
-
-
-// EM Pool table
-ENV_SHARED  em_pool_t        em_eo_pool[EO_POOLS]           ENV_CACHE_LINE_ALIGNED;
-COMPILE_TIME_ASSERT((sizeof(em_eo_pool) % ENV_CACHE_LINE_SIZE) == 0, EM_EO_POOL_TABLE_SIZE_ERROR);
-
-
-// Event Pool (using mbuf-lib), force on own cache line
-ENV_SHARED  em_event_pool_t  em_event_pool  ENV_CACHE_LINE_ALIGNED;
-
-
-
-// Queue element table
-ENV_SHARED  em_queue_element_t      em_queue_element_tbl[EM_MAX_QUEUES] ENV_CACHE_LINE_ALIGNED;       // Static queues first followed by dynamic queues
-// EM dynamic queue pool
-ENV_SHARED  em_pool_t               em_dyn_queue_pool[DYN_QUEUE_POOLS]  ENV_CACHE_LINE_ALIGNED;       // Dynamic queue ID FIFOs
-// Spinlocks for the static numbered queues
-ENV_SHARED  em_spinlock_t           em_static_queue_lock[STATIC_QUEUE_LOCKS] ENV_CACHE_LINE_ALIGNED;  // Static queue ID locks
-// Queue name table
-ENV_SHARED  char                    em_queue_name_tbl[EM_MAX_QUEUES][EM_QUEUE_NAME_LEN]  ENV_CACHE_LINE_ALIGNED;
-// Lock used by queue_init() to serialize rte_ring_create() calls
-ENV_SHARED  em_spinlock_t           queue_create_lock  ENV_CACHE_LINE_ALIGNED;
-
-
-
-// Number of EM cores
-typedef union
-{
-
-  struct
-  {
-    int count;
-
-    // From physical cores ids to logical EM core ids
-    uint8_t logic[MAX_CORES];
-
-    // From logical EM core ids to physical core ids
-    uint8_t phys[MAX_CORES];
-
-
-    // Mask of logic core IDs
-    em_core_mask_t logic_mask;
-
-    // Mask of phys core IDs
-    em_core_mask_t phys_mask;
-  };
-
-
-  uint8_t u8[2 * ENV_CACHE_LINE_SIZE];
-
-} em_core_map_t;
-
-ENV_SHARED  em_core_map_t  em_core_map  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(em_core_map) % ENV_CACHE_LINE_SIZE) == 0, EM_CORE_MAP_SIZE_ERROR);
-
-
+em_data_t  em  ENV_CACHE_LINE_ALIGNED = {{.shm = NULL, .event_pool = NULL}};
 
 
 /**
@@ -193,44 +117,12 @@ ENV_LOCAL  em_core_local_t  em_core_local  ENV_CACHE_LINE_ALIGNED
 
 
 
-/**
- * EM core barrier
- */
-ENV_SHARED  em_barrier_t  em_barrier  ENV_CACHE_LINE_ALIGNED;
-
-
-
-
-/**
- * Queues/rings containing free rte_rings for em_queue_create()/queue_init() to
- * use as q_elem->rte_rings for atomic and parallel-ordered EM queues.
- * Parallel EM queues do not require EM queue specific rings - all events are 
- * handled directly through the scheduling queues.
- */
-typedef union
-{
-  struct
-  {
-    struct rte_ring *atomic_rings;
-    struct rte_ring *parallel_ord_rings;
-  };
-  
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
-  
-} queue_init_rings_t;
-
-/** Queues/rings of rte_rings for atomic and parallel-ordered EM queues (q_elem->rte_ring) */
-ENV_SHARED  queue_init_rings_t  queue_init_rings  ENV_CACHE_LINE_ALIGNED;
-
-
 
 /*
  * Local function prototypes
  */
 static inline em_eo_t eo_alloc(void);
 static inline void    eo_alloc_init(void);
-
-static inline em_eo_element_t* get_current_eo_elem(void);
 
 static inline void        queue_alloc_init(void);
 static inline em_queue_t  queue_alloc(void);
@@ -239,7 +131,7 @@ static size_t str_copy(char* to, const char* from, size_t max);
 
 static inline int get_static_queue_lock_idx(em_queue_t queue);
 
-static void core_map_init(void);
+static void core_map_init(em_core_map_t *const em_core_map, int core_count, const em_core_mask_t *phys_mask);
 
 static inline int phys_to_logic_core_id(const int phys_core);
 static inline int logic_to_phys_core_id(const int logic_core);
@@ -289,11 +181,11 @@ eo_alloc(void)
 
   for(i = 0; i < EO_POOLS; i++)
   {
-    env_spinlock_lock(&em_eo_pool[pool].lock);
+    env_spinlock_lock(&em.shm->em_eo_pool[pool].lock);
 
-    node = m_list_rem_first(&em_eo_pool[pool].list_head);
+    node = m_list_rem_first(&em.shm->em_eo_pool[pool].list_head);
 
-    env_spinlock_unlock(&em_eo_pool[pool].lock);
+    env_spinlock_unlock(&em.shm->em_eo_pool[pool].lock);
 
     eo_elem = m_list_head_to_eo_elem(node);
 
@@ -331,9 +223,9 @@ eo_alloc_init(void)
 
   printf("eo alloc init\n");
 
-  (void) memset(em_eo_element_tbl, 0, sizeof(em_eo_element_tbl));
+  (void) memset(em.shm->em_eo_element_tbl, 0, sizeof(em_eo_element_t) * EM_MAX_EOS);
 
-  (void) memset(em_eo_pool, 0, sizeof(em_eo_pool));
+  (void) memset(em.shm->em_eo_pool, 0, sizeof(em_pool_t) * EO_POOLS);
 
 
   eo = FIRST_EO;
@@ -343,9 +235,9 @@ eo_alloc_init(void)
   //
   for(i = 0; i < EO_POOLS; i++)
   {
-    env_spinlock_init(&em_eo_pool[i].lock);
+    env_spinlock_init(&em.shm->em_eo_pool[i].lock);
 
-    m_list_init(&em_eo_pool[i].list_head);
+    m_list_init(&em.shm->em_eo_pool[i].list_head);
 
 
     for(j = 0; j < EOS_PER_POOL; j++)
@@ -357,7 +249,7 @@ eo_alloc_init(void)
       eo_elem->id   = eo;
       eo_elem->pool = i;
 
-      m_list_add(&em_eo_pool[i].list_head, &eo_elem->list_head);
+      m_list_add(&em.shm->em_eo_pool[i].list_head, &eo_elem->list_head);
       eo++;
     }
   }
@@ -393,6 +285,8 @@ eo_rem_queue(em_eo_element_t    *eo_elem,
              em_queue_element_t *q_elem)
 {
   m_list_rem(&eo_elem->queue_list, &q_elem->list_node);
+  
+  q_elem->eo_elem = NULL;
 }
 
 
@@ -412,13 +306,13 @@ queue_alloc_init(void)
 
   printf("queue init\n");
 
-  (void) memset(em_queue_element_tbl, 0, sizeof(em_queue_element_tbl));
+  (void) memset(em.shm->em_queue_element_tbl, 0, sizeof(em_queue_element_t) * EM_MAX_QUEUES);
 
-  (void) memset(em_dyn_queue_pool,    0, sizeof(em_dyn_queue_pool));
+  (void) memset(em.shm->em_dyn_queue_pool,    0, sizeof(em_pool_t) * DYN_QUEUE_POOLS);
 
-  (void) memset(em_static_queue_lock, 0, sizeof(em_static_queue_lock));
+  (void) memset(em.shm->em_static_queue_lock, 0, sizeof(em_spinlock_t) * STATIC_QUEUE_LOCKS);
 
-  (void) memset(em_queue_name_tbl,    0, sizeof(em_queue_name_tbl));
+  (void) memset(em.shm->em_queue_name_tbl,    0, sizeof(char) * EM_MAX_QUEUES * EM_QUEUE_NAME_LEN);
 
 
   //
@@ -426,9 +320,9 @@ queue_alloc_init(void)
   //
   for(i = 0; i < DYN_QUEUE_POOLS; i++)
   {
-    env_spinlock_init(&em_dyn_queue_pool[i].lock);
+    env_spinlock_init(&em.shm->em_dyn_queue_pool[i].lock);
 
-    m_list_init(&em_dyn_queue_pool[i].list_head);
+    m_list_init(&em.shm->em_dyn_queue_pool[i].list_head);
 
 
     for(j = 0; j < DYN_QUEUES_PER_POOL; j++)
@@ -440,7 +334,7 @@ queue_alloc_init(void)
       q_elem->id   = queue;
       q_elem->pool = i;
 
-      m_list_add(&em_dyn_queue_pool[i].list_head, &q_elem->list_node);
+      m_list_add(&em.shm->em_dyn_queue_pool[i].list_head, &q_elem->list_node);
       queue++;
     }
   }
@@ -451,7 +345,7 @@ queue_alloc_init(void)
   //
   for(i = 0; i < STATIC_QUEUE_LOCKS; i++)
   {
-    env_spinlock_init(&em_static_queue_lock[i].lock);
+    env_spinlock_init(&em.shm->em_static_queue_lock[i].lock);
   }
 
 }
@@ -477,11 +371,11 @@ queue_alloc(void)
 
   for(i = 0; i < DYN_QUEUE_POOLS; i++)
   {
-    env_spinlock_lock(&em_dyn_queue_pool[pool].lock);
+    env_spinlock_lock(&em.shm->em_dyn_queue_pool[pool].lock);
 
-    node = m_list_rem_first(&em_dyn_queue_pool[pool].list_head);
+    node = m_list_rem_first(&em.shm->em_dyn_queue_pool[pool].list_head);
 
-    env_spinlock_unlock(&em_dyn_queue_pool[pool].lock);
+    env_spinlock_unlock(&em.shm->em_dyn_queue_pool[pool].lock);
 
 
     q_elem = m_list_node_to_queue_elem(node);
@@ -523,7 +417,7 @@ queue_init(const char*      name,
   char               *queue_name;
 
   q_elem     =  get_queue_element(queue);
-  queue_name = &em_queue_name_tbl[queue][0];
+  queue_name = &em.shm->em_queue_name_tbl[queue][0];
 
 
   q_elem->context        = NULL;
@@ -607,7 +501,7 @@ queue_init__ring_create(em_queue_type_t q_type)
     // synchronized by scheduling queue dequeue - there's max one event queue pointer in sched queue.
     // Create the RTE-ring only the first time a queue is created, a queue delete will not destoy the rte-ring.
     
-    ret = rte_ring_dequeue(queue_init_rings.atomic_rings, (void **) &rte_ring);
+    ret = rte_ring_dequeue(em.shm->queue_init_rings.atomic_rings, (void **) &rte_ring);
     
     if(!ret) {
       queue_init__ring_flush(rte_ring);
@@ -620,11 +514,11 @@ queue_init__ring_create(em_queue_type_t q_type)
       ring_name[RTE_RING_NAMESIZE-1] = '\0';
       
       // Calls to rte_ring_create() needs to be serialized, use lock
-      env_spinlock_lock(&queue_create_lock.lock);
+      env_spinlock_lock(&em.shm->queue_create_lock.lock);
       
       rte_ring = rte_ring_create(&ring_name[0], EM_QUEUE_ATOMIC_RTE_RING_SIZE, DEVICE_SOCKET, RING_F_SC_DEQ);
       
-      env_spinlock_unlock(&queue_create_lock.lock);
+      env_spinlock_unlock(&em.shm->queue_create_lock.lock);
     }
     
   }
@@ -633,7 +527,7 @@ queue_init__ring_create(em_queue_type_t q_type)
     // Order Queue (preserves order), access serialized by spinlocks (single-producer, single-consumer)
     // Create the RTE-ring only the first time a queue is created, a queue delete will not destoy the rte-ring.
 
-    ret = rte_ring_dequeue(queue_init_rings.parallel_ord_rings, (void **) &rte_ring);
+    ret = rte_ring_dequeue(em.shm->queue_init_rings.parallel_ord_rings, (void **) &rte_ring);
 
     
     if(!ret) {
@@ -647,11 +541,11 @@ queue_init__ring_create(em_queue_type_t q_type)
       ring_name[RTE_RING_NAMESIZE-1] = '\0';
       
       // Calls to rte_ring_create needs to be serialized, use lock      
-      env_spinlock_lock(&queue_create_lock.lock);
+      env_spinlock_lock(&em.shm->queue_create_lock.lock);
       
       rte_ring = rte_ring_create(ring_name, EM_QUEUE_PARALLEL_ORD_RTE_RING_SIZE, DEVICE_SOCKET, (RING_F_SC_DEQ | RING_F_SP_ENQ));
       
-      env_spinlock_unlock(&queue_create_lock.lock);
+      env_spinlock_unlock(&em.shm->queue_create_lock.lock);
     }
   }
   
@@ -710,7 +604,7 @@ queue_delete__ring_free(struct rte_ring *ring_p, em_queue_type_t q_type)
       return EM_ERR_BAD_POINTER;
     }
     
-    ret = rte_ring_enqueue(queue_init_rings.atomic_rings, ring_p);
+    ret = rte_ring_enqueue(em.shm->queue_init_rings.atomic_rings, ring_p);
     
     IF_UNLIKELY(ret == (-ENOBUFS)) {
       return EM_ERR_LIB_FAILED;
@@ -722,7 +616,7 @@ queue_delete__ring_free(struct rte_ring *ring_p, em_queue_type_t q_type)
       return EM_ERR_BAD_POINTER;
     }
     
-    ret = rte_ring_enqueue(queue_init_rings.parallel_ord_rings, ring_p);
+    ret = rte_ring_enqueue(em.shm->queue_init_rings.parallel_ord_rings, ring_p);
       
     IF_UNLIKELY(ret == (-ENOBUFS)) {
       return EM_ERR_LIB_FAILED;
@@ -741,15 +635,15 @@ static em_status_t
 queue_init__rings_init(void)
 { 
   
-  queue_init_rings.atomic_rings = rte_ring_create("ATOMIC q_elem rings",  EM_MAX_QUEUES, DEVICE_SOCKET, 0);  
-  if(queue_init_rings.atomic_rings == NULL) {
+  em.shm->queue_init_rings.atomic_rings = rte_ring_create("ATOMIC q_elem rings",  EM_MAX_QUEUES, DEVICE_SOCKET, 0);  
+  if(em.shm->queue_init_rings.atomic_rings == NULL) {
     return EM_ERR_BAD_POINTER;
   }
   
-  queue_init_rings.parallel_ord_rings = rte_ring_create("PAR-ORD q_elem rings", EM_MAX_QUEUES, DEVICE_SOCKET, 0);
-  if(queue_init_rings.parallel_ord_rings == NULL) {
+  em.shm->queue_init_rings.parallel_ord_rings = rte_ring_create("PAR-ORD q_elem rings", EM_MAX_QUEUES, DEVICE_SOCKET, 0);
+  if(em.shm->queue_init_rings.parallel_ord_rings == NULL) {
     return EM_ERR_BAD_POINTER;
-  }  
+  }
   
   return EM_OK;
 }
@@ -872,7 +766,10 @@ queue_state_change(em_queue_t queue, int all_queues, uint8_t new_state, em_eo_t 
     RETURN_ERROR_IF((q_elem->status != EM_QUEUE_STATUS_BIND) && (q_elem->status != EM_QUEUE_STATUS_READY),
                     EM_ERR_BAD_STATE, EM_ESCOPE_QUEUE_STATE_CHANGE,
                     "EM queue %"PRI_QUEUE" not yet initialized (status %i)", queue, q_elem->status);
-
+    
+    RETURN_ERROR_IF(q_elem->eo_elem == NULL, EM_ERR_BAD_STATE, EM_ESCOPE_QUEUE_STATE_CHANGE,
+                    "EM queue %"PRI_QUEUE" not associated with an EO", queue, q_elem->status);
+    
     q_elem->status = new_state;
 
     err = queue_state_change__sched_masks_change(new_state, q_elem->id, q_elem->scheduler_type, q_elem->queue_group);
@@ -967,7 +864,7 @@ em_queue_create_static(const char* name, em_queue_type_t type, em_queue_prio_t p
 
 
   idx    =  get_static_queue_lock_idx(queue);
-  lock   = &em_static_queue_lock[idx].lock;
+  lock   = &em.shm->em_static_queue_lock[idx].lock;
   q_elem =  get_queue_element(queue);
 
 
@@ -1030,7 +927,7 @@ em_queue_delete(em_queue_t queue)
   
   
   // Zero queue name.
-  em_queue_name_tbl[queue][0] = '\0';
+  em.shm->em_queue_name_tbl[queue][0] = '\0';
   
   
   if(queue <= EM_QUEUE_STATIC_MAX)
@@ -1047,12 +944,12 @@ em_queue_delete(em_queue_t queue)
     // Free queue back to the pool set in init
     pool = q_elem->pool;
 
-    env_spinlock_lock(&em_dyn_queue_pool[pool].lock);
+    env_spinlock_lock(&em.shm->em_dyn_queue_pool[pool].lock);
     
     q_elem->status = EM_QUEUE_STATUS_INVALID;
-    m_list_add(&em_dyn_queue_pool[pool].list_head, &q_elem->list_node);
+    m_list_add(&em.shm->em_dyn_queue_pool[pool].list_head, &q_elem->list_node);
 
-    env_spinlock_unlock(&em_dyn_queue_pool[pool].lock);
+    env_spinlock_unlock(&em.shm->em_dyn_queue_pool[pool].lock);
   }
 
 
@@ -1360,7 +1257,7 @@ em_queue_get_name(em_queue_t queue, char* name, size_t maxlen)
     return 0;
   }
 
-  queue_name = &em_queue_name_tbl[queue][0];
+  queue_name = &em.shm->em_queue_name_tbl[queue][0];
 
   return str_copy(name, queue_name, maxlen);
 }
@@ -1568,11 +1465,11 @@ em_eo_delete(em_eo_t eo)
   // Free EO back to the pool set in init
   pool = eo_elem->pool;
 
-  env_spinlock_lock(&em_eo_pool[pool].lock);
+  env_spinlock_lock(&em.shm->em_eo_pool[pool].lock);
 
-  m_list_add(&em_eo_pool[pool].list_head, &eo_elem->list_head);
+  m_list_add(&em.shm->em_eo_pool[pool].list_head, &eo_elem->list_head);
 
-  env_spinlock_unlock(&em_eo_pool[pool].lock);
+  env_spinlock_unlock(&em.shm->em_eo_pool[pool].lock);
 
 
   return EM_OK;
@@ -2020,7 +1917,7 @@ em_eo_stop_local__done_callback(void *args)
 /**
  * Logical core id.
  *
- * Returns the logical id of the current core.
+ * Returns the logical id of the current core, i.e. the EM-core-ID.
  * EM enumerates cores (or HW threads) to always start from 0 and be contiguous,
  * i.e. valid core identifiers are 0...em_core_count()-1
  *
@@ -2048,7 +1945,7 @@ em_core_id(void)
 int
 em_core_count(void)
 {
-  return em_core_map.count;
+  return em.shm->em_core_map.count;
 }
 
 
@@ -2100,9 +1997,9 @@ em_core_mask_get_physical(em_core_mask_t       *phys,
                           const em_core_mask_t *logic)
 {
 
-  if(em_core_mask_equal(logic, &em_core_map.logic_mask))
+  if(em_core_mask_equal(logic, &em.shm->em_core_map.logic_mask))
   {
-    em_core_mask_copy(phys, &em_core_map.phys_mask);
+    em_core_mask_copy(phys, &em.shm->em_core_map.phys_mask);
   }
   else
   {
@@ -2111,7 +2008,7 @@ em_core_mask_get_physical(em_core_mask_t       *phys,
     em_core_mask_zero(phys);
 
 
-    for(i = 0; i < MAX_CORES; i++)
+    for(i = 0; i < EM_MAX_CORES; i++)
     {
       int phys_core;
 
@@ -2175,7 +2072,7 @@ em_alloc(size_t size, em_event_type_t type, em_pool_id_t pool_id)
   }
   else
   {
-    struct rte_mbuf *const m = rte_pktmbuf_alloc((struct rte_mempool *) em_event_pool.pool);
+    struct rte_mbuf *const m = rte_pktmbuf_alloc((struct rte_mempool *) em.event_pool);
 
     IF_UNLIKELY(m == NULL)
     {
@@ -2273,78 +2170,117 @@ em_free(em_event_t event)
 
 
 /*
- * Global event machine initialization. Run only once.
+ * Event machine process initialization. Run once per process.
  */
 em_status_t
 em_init_global(const em_internal_conf_t *const em_internal_conf)
 {
   em_status_t ret;
+  char       *name = "EMSharedData";
+
+  
+  (void) memset(&em, 0, sizeof(em));
+  
+  if(em_internal_conf->conf.proc_idx == 0)
+  { 
+    em.shm = env_shared_reserve(name, sizeof(em_shared_data_t));
+    
+    RETURN_ERROR_IF(em.shm == NULL, EM_ERR_ALLOC_FAILED, EM_ESCOPE_INIT_GLOBAL,
+                    "env_shared_reserve(%s, sizeof(%lu)) failed!",
+                    name, (unsigned long)sizeof(em_shared_data_t));
+    
+    (void) memset(em.shm, 0, sizeof(em_shared_data_t));
+    
+    // store a pointer to the shared memory (as seen by the primary process) to verify that secondary processes
+    // see exactly the same virtual memory addresses (ptrs inside the shmem do not work otherwise).
+    em.shm->this_shm = em.shm;
+
+    
+    // Initialize the lcore <-> em-core mappings (em-core ids always start from 0)
+    // Keep first.
+    core_map_init(&em.shm->em_core_map, em_internal_conf->conf.core_count, &em_internal_conf->conf.phys_mask);
+
+    printf("em_init_global() on EM-core%02i (lcore %02i)\n", em_core_id(), rte_lcore_id());
+  
+    /* Initialize the error handling */
+    em_error_init();
+  
+    /* Initialise the event pool */
+    em.event_pool = intel_pool_init(EM_EVENT_POOL_NAME);
+    RETURN_ERROR_IF(em.event_pool == NULL, EM_ERR_ALLOC_FAILED, EM_ESCOPE_INIT_GLOBAL,
+                    "EM Event Pool creation failed!");
+  
+    // Init EM data structures
+    queue_alloc_init();
+    eo_alloc_init();
+  
+    // staged init: need to memset & init vars that are used in e.g. queue_group_init_global()
+    sched_init_global_1(); 
+   
+    env_spinlock_init(&em.shm->queue_create_lock.lock);
+  
+    ret = queue_init__rings_init();
+    RETURN_ERROR_IF(ret != EM_OK, ret, EM_ESCOPE_INIT_GLOBAL, "queue_init__rings_init() returned error");
+    
+    
+    event_group_alloc_init();
+    queue_group_init_global();
+  
+    // 2nd stage sched init
+    ret = sched_init_global_2();
+    RETURN_ERROR_IF(ret != EM_OK, ret, EM_ESCOPE_INIT_GLOBAL, "sched_init_global() returned error");
+  
+      
+    
+  #ifdef EVENT_PACKET
+    if(em_internal_conf->conf.pkt_io)
+    {
+      intel_eth_init();
+      
+      intel_init_packet_q_hash_global();
+    }
+  #endif
+  }
+  else
+  {
+    /*
+     * in process-per-core mode: lookup shared data
+     */
+    em.shm = env_shared_lookup(name);
+    
+    // Verify that the EM shared memory was found and that each process sees exactly the 
+    // same virtual address for this memory region.
+    RETURN_ERROR_IF(em.shm == NULL, EM_ERR_NOT_FOUND, EM_ESCOPE_INIT_GLOBAL,
+                    "env_shared_lookup(%s) failed! (0x%"PRIx64")\n", name, (uint64_t)em.shm);
+    
+    RETURN_ERROR_IF(em.shm != em.shm->this_shm, EM_ERR_NOT_FOUND, EM_ESCOPE_INIT_GLOBAL,
+                    "env_shared_lookup(%s) failed - mapping incorrect! (0x%"PRIx64")\n", name, (uint64_t)em.shm);
+    
+    /* Init error handling for child processes */
+    em_error_init_secondary();
+    
+    /* Initialise the event pool */
+    em.event_pool = intel_pool_lookup(EM_EVENT_POOL_NAME);
+    RETURN_ERROR_IF(em.event_pool == NULL, EM_ERR_NOT_FOUND, EM_ESCOPE_INIT_GLOBAL,
+                    "EM Event Pool lookup failed! (0x%"PRIx64")", (uint64_t)em.event_pool);
+  }
 
 
-  // Initialize the lcore <-> em-core mappings (em-core ids always start from 0)
-  // Keep first.
-  core_map_init();
 
-  printf("em_init_global() on EM-core %u (lcore %u)\n", em_core_id(), rte_lcore_id());
-
-  #ifdef EM_64_BIT
-  printf("EM API version: v%i.%i, 64 bit \n", EM_API_VERSION_MAJOR, EM_API_VERSION_MINOR);
-  #else
-  printf("EM API version: v%i.%i, 32 bit \n", EM_API_VERSION_MAJOR, EM_API_VERSION_MINOR);
+  #ifdef EVENT_TIMER
+  /*
+   * Initialize the event timer once per process.
+   */
+    if(em_internal_conf->conf.evt_timer)
+    {
+      int err = evt_timer_init_global();
+      
+      RETURN_ERROR_IF(err != EVT_TIMER_OK, EM_ERR_LIB_FAILED, EM_ESCOPE_INIT_GLOBAL,
+                      "evt_timer_init_global() returned error %i", err);
+    }
   #endif
 
-  /* Initialize the error handling */
-  em_error_init();
-
-
-  /* Initialize the EM barrier */
-  env_barrier_init(&em_barrier.barrier, env_core_mask_count(em_core_count()));
-
-
-  /* Initialise the event pool */
-  em_event_pool.pool = intel_pool_init();
-
-  // Init EM data structures
-  queue_alloc_init();
-  eo_alloc_init();
-
-  // staged init: need to memset & init vars that are used in e.g. queue_group_init_global()
-  sched_init_global_1(); 
- 
-  env_spinlock_init(&queue_create_lock.lock);
-
-  ret = queue_init__rings_init();
-  RETURN_ERROR_IF(ret != EM_OK, ret, EM_ESCOPE_INIT_GLOBAL, "queue_init__rings_init() returned error");
   
-  
-  event_group_alloc_init();
-  queue_group_init_global();
-
-  // 2nd stage sched init
-  ret = sched_init_global_2();
-  RETURN_ERROR_IF(ret != EM_OK, ret, EM_ESCOPE_INIT_GLOBAL, "sched_init_global() returned error");
-
-
-#ifdef EVENT_TIMER
-  if(em_internal_conf->conf.evt_timer)
-  {
-    int err = evt_timer_init_global();
-    
-    RETURN_ERROR_IF(err != EVT_TIMER_OK, EM_ERR_LIB_FAILED, EM_ESCOPE_INIT_GLOBAL,
-                    "evt_timer_init_global() returned error %i", err);
-  }
-#endif
-  
-  
-#ifdef EVENT_PACKET
-  if(em_internal_conf->conf.pkt_io)
-  {
-    intel_eth_init();
-    
-    intel_init_packet_q_hash_global();
-  }
-#endif
-
 
   env_sync_mem();
 
@@ -2354,7 +2290,7 @@ em_init_global(const em_internal_conf_t *const em_internal_conf)
 
 
 /*
- * Local event machine initialization. Run on each core.
+ * Local event machine initialization. Run on each EM-core.
  */
 em_status_t
 em_init_local(const em_internal_conf_t *const em_internal_conf)
@@ -2365,7 +2301,7 @@ em_init_local(const em_internal_conf_t *const em_internal_conf)
 
   core_id = em_core_id();
 
-  printf("em_init_local() on em-core %u\n", core_id);
+  printf("em_init_local() on em-core %u\n", core_id); fflush(NULL);
 
   // Don't memset em_core_local anymore, use static initialization at declaration,
   // because EM-core 0 might use these vars during global startup - thus avoid dual initialization.
@@ -2447,11 +2383,18 @@ em_print_info(void)
   printf(                             "\n"
          "==========================" "\n"
          "EM Info on Intel:"          "\n"
+         "EM API version: v%i.%i, "
+       #ifdef EM_64_BIT
+         "64 bit"                     "\n"
+       #else
+         "32 bit"                     "\n"
+       #endif         
          "Cache Line size         = %u B"  "\n"
          "em_queue_element_t      = %lu B" "\n"
          "em_queue_element_t.lock = %lu B" "\n"
          "==========================" "\n"
                                       "\n",
+         EM_API_VERSION_MAJOR, EM_API_VERSION_MINOR,
          ENV_CACHE_LINE_SIZE,
          sizeof(em_queue_element_t),
          offsetof(em_queue_element_t, lock)
@@ -2482,29 +2425,31 @@ get_static_queue_lock_idx(em_queue_t queue)
 
 
 static void
-core_map_init(void)
+core_map_init(em_core_map_t *const em_core_map, int core_count, const em_core_mask_t *phys_mask)
 {
-  int i;
-  int count;
+  int phys_id    = 0;  
+  int logic_id   = 0;
 
 
-  (void) memset(&em_core_map, 0, sizeof(em_core_map));
-
-  //
-  // Loop through all running cores
-  //
-
-  RTE_LCORE_FOREACH(i)
+  (void) memset(em_core_map, 0, sizeof(em_core_map_t));
+  
+  
+  em_core_map->count = core_count;
+  
+  em_core_mask_copy(&em_core_map->phys_mask, phys_mask);
+  
+  em_core_mask_set_count(core_count, &em_core_map->logic_mask);
+  
+  
+  while((logic_id < core_count) && (phys_id < EM_MAX_CORES))
   {
-    count = em_core_map.count;
-
-    em_core_map.logic[i]    = count;
-    em_core_map.phys[count] = i;
-
-    em_core_mask_set(count, &em_core_map.logic_mask);
-    em_core_mask_set(i,     &em_core_map.phys_mask);
-
-    em_core_map.count++;
+    if(em_core_mask_isset(phys_id, &em_core_map->phys_mask))
+    {    
+      em_core_map->logic[phys_id] = logic_id;
+      em_core_map->phys[logic_id] = phys_id;
+      logic_id++;
+    }
+    phys_id++;
   }
   
 }
@@ -2514,7 +2459,7 @@ core_map_init(void)
 static inline int
 logic_to_phys_core_id(const int logic_core)
 {
-  return em_core_map.phys[logic_core];
+  return em.shm->em_core_map.phys[logic_core];
 }
 
 
@@ -2522,7 +2467,7 @@ logic_to_phys_core_id(const int logic_core)
 static inline int
 phys_to_logic_core_id(const int phys_core)
 {
-  return em_core_map.logic[phys_core];
+  return em.shm->em_core_map.logic[phys_core];
 }
 
 

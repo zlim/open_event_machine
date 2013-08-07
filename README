@@ -1,4 +1,4 @@
-Copyright (c) 2012, Nokia Siemens Networks
+Copyright (c) 2013, Nokia Siemens Networks
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -66,8 +66,10 @@ an event from a queue based on priority, and calls the EO's receive function
 for event processing. The EO might send events to other EOs or HW-accelerators 
 for further processing or output. The next event for the core is selected only 
 after the EO has returned. The selected queue type, queue priority and queue 
-group affects the scheduling. Dynamic load balancing of work between the cores 
-is the default behaviour.
+group affects the scheduling. Dynamic load balancing of work between the cores
+is the default behaviour. Note that the application (or EO) is not tied to a 
+particular core, instead the event processing for the EO is performed on any core
+that is available at that time.
 
 
 The implementation of OpenEM for Intel CPUs in this package should NOT be considered a 
@@ -78,6 +80,18 @@ E.g. events are scheduled in bursts rather than on an event-by-event basis and p
 performed separately for each queue group&type instead of always taking into account all queues/events
 on the whole device. Only four (4) queue priority levels are used to speed-up the scheduling.
 
+OpenEM for Intel runs in Linux user space and supports two modes of operation:
+ - Each EM-core runs in a separate (single threaded) process     = EM process-per-core mode.
+ - Each EM-core runs in a separate thread under a single process = EM thread-per-core  mode.
+The mode is selected at application startup with command line options:
+ -p for EM process-per-core mode 
+ -t for EM thread-per-core  mode
+Note that the selected mode affects the application mainly in how shared memory can be used,
+i.e. normal linux pthread vs. process rules for data sharing&protection apply.
+The provided example applications work in both modes.
+Pointers can be shared/passed between EM-cores, even in the multi-process mode, because DPDK and the 
+forking of each process allowes all processes see the same virt<->phys memory mappings.
+
 
 ====================================================================================================
 2. Dependencies
@@ -86,7 +100,11 @@ To be able to build and run the Open Event Machine for Intel, you need the follo
 environment, tools and SW packages:
 
 Environment:
-- x86 Intel multicore CPU and Linux
+- x86_64 Intel multicore CPU, preferrably a CPU that supports 1GB huge pages
+  /proc/cpuinfo - flags contain 'pdpe1gb'. 2MB huge page support also works but the
+  DPDK config might have to be tweaked a bit (more memory segments etc).
+- Linux with Address Space Layout Randomization (ASLR) preferrably turned off (see DPDK docs).
+  (set /proc/sys/kernel/randomize_va_space to '0')
 - 1GE or 10GE NICs supported by the Intel DPDK package (if using packet I/O)
 
 Tools:
@@ -94,31 +112,35 @@ Tools:
 - GNU Make
 
 SW packages:
-- Intel DPDK 1.2.3-3 (DPDK source code and documents: http://www.intel.com/go/dpdk)
+- Intel DPDK 1.3.1-7 (DPDK source code and documents: http://www.intel.com/go/dpdk) - DPDK 
+  docs provide a more thorough description about the environment requirements.
 
 Note: The setup used in testing:
-- Intel Westmere or Sandy Bridge based Xeon E5 multicore processor
+- Intel Sandy Bridge based Xeon E5 multicore processor
 - Intel 82599 10 Gigabit Ethernet Controller
 - Ubuntu 11.04, kernel 2.6.38-11-generic (kernel options added):
     default_hugepagesz=1G hugepagesz=1G hugepages=4
 - GCC 4.5.2 or
-- ICC 12.1.3 20120212, 12.1.6 20120821
+- ICC 12.1.3 20120212, 12.1.6 20120821, 13.1.1 20130313
 - GNU Make 3.81
-- Intel DPDK 1.2.3-3
+- Intel DPDK 1.3.1-7
 
 
 ====================================================================================================
 3. Installation
 ====================================================================================================
 First install the needed tools and SW packages. Install the Intel DPDK software
-according to the DPDK installation guide.
+according to the DPDK installation instructions.
 
 The Open Event Machine package consists of source code and is installed simply
 by extracing the source from the archive-file.
 
+Note: Linux 1GB huge pages recommended. 2MB huge pages work but need a bit of tweaking of the number
+      of pages to get enough memory to use. Also DPDK probably needs a lot more of memory segments
+      (set in DPDK .config) to be able to map all the 2MB pages into DPDK memsegments.
 
 ====================================================================================================
-4. Compilation
+4. Compile & Run
 ====================================================================================================
 
 Changes to the DPDK standard config for OpenEM:
@@ -127,91 +149,139 @@ Changes to the DPDK standard config for OpenEM:
 Note: Especially the memory related config values could be smaller, depending much on the application.
 
 
-#CONFIG_RTE_MAX_MEMSEG=32
-CONFIG_RTE_MAX_MEMSEG=64
+#CONFIG_RTE_MAX_MEMZONE=2560
+## 1M memzones
+#CONFIG_RTE_MAX_MEMZONE=1048576
+## 128k memzones
+CONFIG_RTE_MAX_MEMZONE=131072
 
-#CONFIG_RTE_MAX_MEMZONE=512
-CONFIG_RTE_MAX_MEMZONE=1048576
-
-#CONFIG_RTE_LIBEAL_USE_HPET=y (related to event_timer usage - HPET usage seems too slow)
+#CONFIG_RTE_LIBEAL_USE_HPET=y
 CONFIG_RTE_LIBEAL_USE_HPET=n
 
-#CONFIG_RTE_LIBRTE_IGB_PMD=y (if you want to run using 1GE IFs then keep this as 'y', tests have been run with 10GE IFs)
+#CONFIG_RTE_LIBRTE_IGB_PMD=y
 CONFIG_RTE_LIBRTE_IGB_PMD=n
 
 #CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE=512
+#CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE=1024
 CONFIG_RTE_MEMPOOL_CACHE_MAX_SIZE=2048
 
 #CONFIG_RTE_MBUF_SCATTER_GATHER=y
-CONFIG_RTE_MBUF_SCATTER_GATHER=n
-
 #CONFIG_RTE_MBUF_REFCNT_ATOMIC=y
+CONFIG_RTE_MBUF_SCATTER_GATHER=n
 CONFIG_RTE_MBUF_REFCNT_ATOMIC=n
 
 
+Recompile DPDK with the changes above before compiling and running the Open Event Machine
+tests (first install and config DPDK as described in the manuals, then recompile). E.g.:
+  > cd {DPDK 1.3.1-7 DIR}/x86_64-default-linuxapp-gcc/
+  > make clean
+  > make
 
-Recompile DPDK with these changes before comiling and running the Open Event Machine
-tests.
 
-
-
+OpenEM application Make commands:
+  > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel
+    or
+  > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
+  
+  > make real_clean && make em_clean && make clean && make
+  
+    > make real_clean - Cleans the application and build directories
+    > make em_clean   - Cleans the EM-library
+    > make clean      - Cleans the application (leaves build dirs)
+    > make            - Compile & link the application
+  
+-------------------------------------------
 A) Compile & run the example test cases
+-------------------------------------------
 1. Change into the OpenEM-intel example directory
   > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel
 
 2. Build the test applications: 'hello', 'perf', 'event_group' and 'error' 
+ (> make real_clean && make em_clean)
   > make
   
 3. Run one of the compiled examples, e.g.:
-  > sudo ./build/hello -c 0xfe -n 4         (Run 'hello' on 7 cores)
-  > sudo ./build/perf -c 0xffff -n 4        (Run 'perf' on 16 cores)
-  > sudo ./build/event_group -c 0x0c0c -n 4 (Run 'event_group' on 4 cores)
-  > sudo ./build/error -c 0x3 -n 4          (Run 'error' on 2 cores)
+  > sudo ./build/hello -c 0xfe -n 4 -- -p          (Run 'hello' on  7 cores using EM process-per-core mode(-p))
+  > sudo ./build/hello -c 0xfcfc -n 4 -- -t        (Run 'hello' on 12 cores using EM thread-per-core  mode(-t))
+  
+  > sudo ./build/perf -c 0xffff -n 4 -- -p         (Run 'perf' on 16 cores using EM process-per-core mode(-p))
+  > sudo ./build/perf -c 0xfffe -n 4 -- -t         (Run 'perf' on 15 cores using EM thread-per-core  mode(-t))
+  
+  > sudo ./build/event_group -c 0x0c0c -n 4 -- -p  (Run 'event_group' on 4 cores using EM process-per-core mode(-p))
+  > sudo ./build/event_group -c 0x00f0 -n 4 -- -t  (Run 'event_group' on 4 cores using EM thread-per-core  mode(-t))
+  
+  > sudo ./build/error -c 0x3 -n 4 -- -p           (Run 'error' on 2 cores using EM process-per-core mode(-p))
+  > sudo ./build/error -c 0x2 -n 4 -- -t           (Run 'error' on 1 core  using EM thread-per-core  mode(-t))
+  
 
-Note: the "-c 0xfe -n 4" are DPDK command line options, see the DPDK manuals.
-  -c COREMASK: hexadecimal bitmask of cores we are running on,
-     here 0xfe = start 7 cores: 1-7, 0 left for Linux
-  -n NUM     : force number of memory channels
-     here we forced this to 4 to match the test system
+  Help available on command line options through the -h, --help options, e.g.:
+  > sudo ./build/hello --help
 
-Clean the example test case build: 
-  Clean the test applications:
-    > cd {OPEN EVENT MACHINE DIR}/event_test/example/intel 
-    > make clean
-  Clean the test application and output directories 
-    > make real_clean
-  Clean the Open EM library 
-    > make em_clean
+      Usage: hello DPDK-OPTIONS -- APPL&EM-OPTIONS
+        E.g. hello -c 0xfe -n 4 -- -p
+      
+      Open Event Machine example application.
+      
+      Mandatory DPDK-OPTIONS options:
+        -c                      Coremask (hex) - select the cores that the application&EM will run on.
+        -n                      DPDK-option: Number of memory channels in the system
+      
+      Optional [DPDK-OPTIONS]
+       (see DPDK manuals for an extensive list)
+      
+      Mandatory APPL&EM-OPTIONS:
+        -p, --process-per-core  Running OpenEM with one process per core.
+        -t, --thread-per-core   Running OpenEM with one thread per core.
+      
+        Select EITHER -p OR -t, but not both!
+      
+      Optional [APPL&EM-OPTIONS]
+        -h, --help              Display help and exit.
 
 
-
+-------------------------------------------
 B) Compile & run the packet I/O test cases
+-------------------------------------------
 
 1. Change into the OpenEM-intel packet-io directory
   > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
 
 2. Build the test applications: 'packet_loopback' and 'packet_multi_stage'
+ (> make real_clean && make em_clean)
   > make
   
 3. Run one of the compiled examples, e.g.:
-  > sudo ./build/packet_loopback -c 0xfe -n 4       (Run 'packet_loopback' on 7 cores)
-  > sudo ./build/packet_multi_stage -c 0xffff -n 4  (Run 'packet_multi_stage' on 16 cores)
+  > sudo ./build/packet_loopback -c 0xfe -n 4 -- -p       (Run 'packet_loopback' on  7 cores using EM process-per-core mode(-p))
+  > sudo ./build/packet_loopback -c 0xfffe -n 4 -- -t     (Run 'packet_loopback' on 15 cores using EM thread-per-core  mode(-t))
+  
+  > sudo ./build/packet_multi_stage -c 0xffff -n 4 -- -p  (Run 'packet_multi_stage' on 16 cores using EM process-per-core mode(-p))
+  > sudo ./build/packet_multi_stage -c 0xfefe -n 4 -- -t  (Run 'packet_multi_stage' on 14 cores using EM thread-per-core  mode(-t))
 
-Note: the "-c 0xfe -n 4" are DPDK command line options, see the DPDK manuals.
-  -c COREMASK: hexadecimal bitmask of cores we are running on,
-     here 0xfe = start 7 cores: 1-7, 0 left for Linux
-  -n NUM     : force number of memory channels
-     here we forced this to 4 to match the test system
 
-Clean the packet-io test case build: 
-  Clean the test applications:
-    > cd {OPEN EVENT MACHINE DIR}/event_test/packet_io/intel
-    > make clean
-  Clean the test application and output directories 
-    > make real_clean
-  Clean the Open EM library 
-    > make em_clean
-
+  Help available on command line options through the -h, --help options, e.g.:
+  > sudo ./build/packet_loopback --help
+    
+    Usage: packet_loopback DPDK-OPTIONS -- APPL&EM-OPTIONS
+      E.g. packet_loopback -c 0xfe -n 4 -- -p
+    
+    Open Event Machine example application.
+    
+    Mandatory DPDK-OPTIONS options:
+      -c                      Coremask (hex) - select the cores that the application&EM will run on.
+      -n                      DPDK-option: Number of memory channels in the system
+    
+    Optional [DPDK-OPTIONS]
+     (see DPDK manuals for an extensive list)
+    
+    Mandatory APPL&EM-OPTIONS:
+      -p, --process-per-core  Running OpenEM with one process per core.
+      -t, --thread-per-core   Running OpenEM with one thread per core.
+    
+      Select EITHER -p OR -t, but not both!
+    
+    Optional [APPL&EM-OPTIONS]
+      -h, --help              Display help and exit.
+      
 
 ====================================================================================================
 5. Examples / Test Cases
@@ -235,7 +305,10 @@ A) Basic standalone Examples - does not require any external input or I/O,
   event is received. Note the changing core number in the printout below (the event is handled
   by any core that is ready to take on new work):
 
-  > sudo ./build/hello -c 0xff -n 4
+  Run hello on 8 cores
+  > sudo ./build/hello -c 0xff -n 4 -- -p
+    or 
+  > sudo ./build/hello -c 0xff -n 4 -- -t
     ...    
     Hello world started EO A. I'm EO 0. My queue is 320.
     Hello world started EO B. I'm EO 1. My queue is 321.
@@ -262,38 +335,55 @@ A) Basic standalone Examples - does not require any external input or I/O,
   Also note that the way EM-cores are mapped to HW threads matters - using HW threads on the
   same CPU-core differs from using HW threads on separate cores.
 
+  Sample output run an a CPU with 8 cores, 16 HW threads - max core mask -c 0xffff
+
   Run on 4 EM-cores:    
-  >  sudo ./build/perf -c 0xf -n 4  (4 HW threads on separate cores)
+  >  sudo ./build/perf -c 0xf -n 4 -- -p     (4 EM-cores (=processes) mapped to 4 HW threads on separate cores)
+  >  sudo ./build/perf -c 0x0303 -n 4 -- -p  (4 EM-cores (=processes) mapped to 4 HW threads on 2 cores, 2 HW threads per core)
+   or 
+  >  sudo ./build/perf -c 0xf -n 4 -- -t     (4 EM-cores (=pthreads) mapped to 4 HW threads on separate cores)
+  >  sudo ./build/perf -c 0x0303 -n 4 -- -t  (4 EM-cores (=pthreads) mapped to 4 HW threads on 2 cores, 2 HW threads per core)
+  
+  
+  > sudo ./build/perf -c 0xf -n 4 -- -p
   ...
-  cycles per event 255.89  @2693.25 MHz (core-03 2)
-  cycles per event 256.76  @2693.25 MHz (core-02 2)
-  cycles per event 257.59  @2693.25 MHz (core-01 2)
-  cycles per event 258.53  @2693.25 MHz (core-00 2)
-  cycles per event 255.96  @2693.25 MHz (core-03 3)
-  cycles per event 256.98  @2693.25 MHz (core-02 3)
-  cycles per event 257.12  @2693.25 MHz (core-01 3)
-  cycles per event 258.26  @2693.25 MHz (core-00 3)
+  cycles per event 263.99  @2693.43 MHz (core-00 2)
+  cycles per event 264.10  @2693.43 MHz (core-02 2)
+  cycles per event 264.20  @2693.43 MHz (core-01 2)
+  cycles per event 265.37  @2693.43 MHz (core-03 2)
+  cycles per event 263.76  @2693.43 MHz (core-00 3)
+  cycles per event 263.98  @2693.43 MHz (core-02 3)
+  cycles per event 264.27  @2693.43 MHz (core-01 3)
+  cycles per event 264.99  @2693.43 MHz (core-03 3)
   ...
   
+  
   Run on 8 EM-cores:
-  > sudo ./build/perf -c 0xff -n 4
+  >  sudo ./build/perf -c 0xff -n 4 -- -p    (8 EM-cores (=processes) mapped to 8 HW threads on separate cores)
+  >  sudo ./build/perf -c 0x0f0f -n 4 -- -p  (8 EM-cores (=processes) mapped to 8 HW threads on 4 cores, 2 HW threads per core)
+   or 
+  >  sudo ./build/perf -c 0xff -n 4 -- -t    (8 EM-cores (=pthreads) mapped to 8 HW threads on separate cores)
+  >  sudo ./build/perf -c 0x0f0f -n 4 -- -t  (8 EM-cores (=pthreads) mapped to 8 HW threads on 4 cores, 2 HW threads per core)  
+  
+  
+  > sudo ./build/perf -c 0xff -n 4 -- -p
   ...
-  cycles per event 303.10  @2693.25 MHz (core-07 2)
-  cycles per event 304.63  @2693.25 MHz (core-01 2)
-  cycles per event 303.99  @2693.25 MHz (core-00 2)
-  cycles per event 305.61  @2693.25 MHz (core-05 2)
-  cycles per event 305.46  @2693.25 MHz (core-02 2)
-  cycles per event 306.48  @2693.25 MHz (core-03 2)
-  cycles per event 306.95  @2693.25 MHz (core-04 2)
-  cycles per event 321.63  @2693.25 MHz (core-06 2)
-  cycles per event 303.00  @2693.25 MHz (core-07 3)
-  cycles per event 303.85  @2693.25 MHz (core-00 3)
-  cycles per event 305.19  @2693.25 MHz (core-01 3)
-  cycles per event 305.14  @2693.25 MHz (core-05 3)
-  cycles per event 305.95  @2693.25 MHz (core-02 3)
-  cycles per event 306.27  @2693.25 MHz (core-03 3)
-  cycles per event 307.56  @2693.25 MHz (core-04 3)
-  cycles per event 304.29  @2693.25 MHz (core-06 3)
+  cycles per event 308.63  @2693.43 MHz (core-07 2)
+  cycles per event 309.91  @2693.43 MHz (core-00 2)
+  cycles per event 309.79  @2693.43 MHz (core-06 2)
+  cycles per event 310.68  @2693.43 MHz (core-01 2)
+  cycles per event 311.75  @2693.43 MHz (core-05 2)
+  cycles per event 311.72  @2693.43 MHz (core-02 2)
+  cycles per event 312.15  @2693.43 MHz (core-03 2)
+  cycles per event 312.53  @2693.43 MHz (core-04 2)
+  cycles per event 308.73  @2693.43 MHz (core-07 3)
+  cycles per event 309.91  @2693.43 MHz (core-00 3)
+  cycles per event 310.49  @2693.43 MHz (core-06 3)
+  cycles per event 310.76  @2693.43 MHz (core-01 3)
+  cycles per event 311.63  @2693.43 MHz (core-05 3)
+  cycles per event 311.55  @2693.43 MHz (core-02 3)
+  cycles per event 311.82  @2693.43 MHz (core-03 3)
+  cycles per event 312.82  @2693.43 MHz (core-04 3)
   ...
   
   ---------------------------------------------------------
@@ -310,7 +400,9 @@ A) Basic standalone Examples - does not require any external input or I/O,
   
   Note that we continue executing after a fatal error since these are only test-errors...
 
-  > sudo ./build/error -c 0xf -n 4
+  > sudo ./build/error -c 0xf -n 4 -- -p
+   or 
+  > sudo ./build/error -c 0xf -n 4 -- -t
   ...
   Error log from EO C [0] on core 1!
   THIS IS A FATAL ERROR!!
@@ -343,7 +435,9 @@ A) Basic standalone Examples - does not require any external input or I/O,
   event group id. In a more complex example each data event could be send from different
   EO:s to different queues and the final notification event sent yet to another queue.    
 
-  > sudo ./build/event_group -c 0xf -n 4
+  > sudo ./build/event_group -c 0xf -n 4 -- -p
+    or 
+  > sudo ./build/event_group -c 0xf -n 4 -- -t
   ...
   Start.
   Done. Notification event received after 256 data events. Cycles curr:149944, ave:149944
@@ -381,6 +475,9 @@ B) Simple Packet I/O examples - used together with an external traffic generator
     Use the traffic generator to find the max sustainable throughput for loopback traffic.
     The throughput should increase near-linearly with increasing core counts (set by -c 0xcoremask).
 
+    > sudo ./build/packet_loopback -c 0xffff -n 4 -- -p
+      or 
+    > sudo ./build/packet_loopback -c 0xffff -n 4 -- -t
 
   ---------------------------------------------------------
   B2) packet_multi_stage.c  (executable: 'packet_multi_stage')
@@ -396,13 +493,43 @@ B) Simple Packet I/O examples - used together with an external traffic generator
 
     Use the traffic generator to find the max sustainable throughput for multi-stage traffic.
     The throughput should increase near-linearly with increasing core counts (set by -c 0xcoremask).
+
+    > sudo ./build/packet_multi_stage -c 0xffff -n 4 -- -p
+      or 
+    > sudo ./build/packet_multi_stage -c 0xffff -n 4 -- -t
     
 
 ====================================================================================================
 6. Changes
 ====================================================================================================
+---------------------------------------
+Open Event Machine 1.2:
+---------------------------------------
+- Requires Intel DPDK 1.3.1-7 available at www.intel.com/go/dpdk (OpenEM 1.1 and older used DPDK 1.2.3-3) 
 
+- Support for both EM process-per-core and EM thread-per-core modes, selected at application startup with the 
+  command line options -p (process) or -t (thread).
+
+- Usage of 'ENV_SHARED' to create global shared data does not work with the multi-process model - thus 'ENV_SHARED'
+  has been removed from all applications and is no longer provided.
+
+- Shared memory should be created with env_shared_reserve() or env_shared_malloc() (instead of ENV_SHARED).
+  Both aforementioned functions return a huge page backed buffer that can be shared between EM-cores. Also 
+  pointers to these buffers can be passed between EM-cores.
+  The env_shared_reserve("name") creates a named memory region that other cores can look-up using the name.
+  Buffers reserved this way can not be freed.
+  The env_shared_malloc() provides malloc-like functionality and returns shareable buffers that can be freed
+  with env_shared_free().
+  See the example applications for details on shared memory creation. Applications using env_shared_reserve()
+  or env_shared_malloc() works in both process-per-core and thread-per-core modes. Events are allocated with
+  em_alloc() as before.
+  The env_*() functions are not part of the OpenEM API.
+
+ - Application initialization code changed to better work in both thread-per-core and process-per-core modes.
+
+---------------------------------------
 Open Event Machine 1.1:
+---------------------------------------
 - The Event Machine is compiled into a static library (libem.a) that the test applications link against.
 
 - Building the example applications: 'make' builds all examples in the directory instead of just one.
@@ -450,9 +577,11 @@ Open Event Machine 1.1:
   Example of the usage of these functions along with the changed initialization can be studied in the
   event_test/example and event_test/packet_io directories.
 
-
+---------------------------------------
 Open Event Machine 1.0:
+---------------------------------------
 - Created.
+
 
 ====================================================================================================
 7. Open Issues
@@ -460,11 +589,35 @@ Open Event Machine 1.0:
 - em_atomic_processing_end() not implemented - currently just return. The solution must take event
   dequeue-bursts into consideration.
 
+
 ====================================================================================================
-8. Timers - event based notification
+8. Packet I/O
 ====================================================================================================
-Note: The event_timer is not a part of OpenEM. The current timer API, functionality and implementation
-      may change later on. The Intel version is an experimental feature.
+Note: The OpenEM API does not contain an API for packet-I/O, however simple packet I/O functionality
+      has been added to demonstrate a way to connect packet-I/O into the OpenEM. The packet-I/O API
+      used here is by no means standard or mandatory and could be modified/replaced to better suit
+      the processing environment used in your project.
+      See the Packet-I/O examples for more details.
+
+Enable the PacketI/O by setting: em_conf.pkt_io = 1 before calling em_init(&em_conf):
+  ...
+  em_conf.pkt_io = 1; // Packet-I/O:  disable=0, enable=1
+  ...
+  em_init(&em_conf);
+
+
+====================================================================================================
+9. Timers - event based notification
+====================================================================================================
+Note: The event timer is not (yet?) a part of OpenEM. The current timer API, functionality and
+      implementation may change later on. The version for Intel is an experimental feature.
+
+Enable the event timer by setting: em_conf.evt_timer = 1 before calling em_init(&em_conf):
+  ...
+  em_conf.evt_timer = 1; // Event-Timer: disable=0, enable=1 
+  ...
+  em_init(&em_conf);
+
 
 Timer usage with OpenEM:
 
@@ -484,12 +637,13 @@ can immediately start using timeouts through the API calls evt_request_timeout()
 
 No example test application is currently included - TBD.
 
+
 ====================================================================================================
-9. Notes
+10. Notes
 ====================================================================================================
 Miscellaneous notes regarding the OpenEM usage and performance.
 
-9.1 OpenEM Configuration parameters:
+10.1 OpenEM Configuration parameters:
 
 - RX_DIRECT_DISPATCH - 0(disabled=default) or 1(enabled) in event_machine/intel/em_intel_packet.h
 
@@ -510,7 +664,7 @@ Miscellaneous notes regarding the OpenEM usage and performance.
 
 
 
-9.2 Event bursting:
+10.2 Event bursting:
 
 To improve performance & throughput events are dequeued from the scheduling queues and eth-ports
 in bursts rather than one-by-one. The best event load balancing and priority handling over all cores 
@@ -519,7 +673,6 @@ it has been decided to allow bursting to favor performance.
 The defines MAX_Q_BULK_ATOMIC&MAX_E_BULK_ATOMIC, MAX_E_BULK_PARALLEL and MAX_E_BULK_PARALLEL_ORD can be tuned
 to change the dequeue burst sizes in the scheduler (em_intel_sched.c)
 Eth Rx and Tx burst sizes can be changed through the MAX_RX_PKT_BURST and MAX_TX_PKT_BURST defines (em_intel_packet.c)
-
 
 
 

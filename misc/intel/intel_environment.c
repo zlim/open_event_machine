@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "intel_hw_init.h"
+
 
 
 typedef union
@@ -47,8 +49,11 @@ ENV_LOCAL  intel_env_core_local_t  intel_env_core_local = {.core_hz = 0};
 
 
 
-
-uint64_t env_core_hz_linux(void)
+/**
+ * Return the used core frequency
+ */
+uint64_t
+env_core_hz_linux(void)
 {
 
   if(likely(intel_env_core_local.core_hz))
@@ -120,6 +125,98 @@ uint64_t env_core_hz_linux(void)
 }
 
 
+
+/**
+ * Reserve hugepage memory (static allocation) that can be shared by multiple processes.
+ *
+ * @note Memory reserved with env_shared_reserve() can NOT be unreserved.
+ * Use at initialization time only.
+ * 
+ * @param name   
+ * @param size  
+ * 
+ */
+void *
+env_shared_reserve(const char *name, size_t size)
+{
+  const struct rte_memzone *mz;
+  void                     *buf = NULL;
+  
+  
+  IF_UNLIKELY((name == NULL) || (size == 0)) {
+    return NULL;
+  }
+  
+  
+  mz = rte_memzone_reserve(name, size, DEVICE_SOCKET, 0);  
+  
+  IF_LIKELY(mz != NULL)
+  {
+		buf = mz->addr; // virtual address
+	}
+	
+	return buf;
+}
+
+
+
+/**
+ * Lookup shared hugepage memory previously reserved by env_shared_reserve().
+ * 
+ * @note Memory reserved with env_shared_reserve() can NOT be unreserved.
+ * Use at initialization time only.
+ *
+ * @param name  
+ * 
+ * @see env_shared_reserve()
+ */
+void *
+env_shared_lookup(const char *name)
+{
+  const struct rte_memzone *mz;
+  void                     *buf = NULL;
+    
+
+  IF_UNLIKELY(name == NULL) {
+    return NULL;
+  }
+  
+  
+  mz = rte_memzone_lookup(name);
+  
+  IF_LIKELY(mz != NULL)
+  {
+    buf = mz->addr; // virtual address
+  }
+  
+  return buf;
+}
+
+
+
+/**
+ * Allocate shared hugepage memory.
+ * 
+ * @note Not for use in the fast path.
+ */
+void *
+env_shared_malloc(size_t size)
+{                
+  return rte_malloc(NULL, size, 0); // Cache-line aligned alloc
+}
+
+
+
+/**
+ * Frees memory previously allocated by env_shared_malloc()
+ *
+ * @note Not for use in the fast path.
+ */
+void
+env_shared_free(void *buf)
+{
+  rte_free(buf); // rte_free() performs NULL check
+}
 
 
 

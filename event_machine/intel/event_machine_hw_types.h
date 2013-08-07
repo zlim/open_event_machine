@@ -67,13 +67,22 @@ typedef void* em_event_t;
  */
 typedef struct
 {
- 
-  int em_instance_id; /**< Event Machine Instance Id */
+  int em_instance_id;   /**< Event Machine Instance Id */
+                        
+  int pkt_io;           /**< Packet I/O: enable=1, disable=0 */
+                        
+  int evt_timer;        /**< Event Timer: enable=1, disable=0 */
+
+  int process_per_core; /**< RunMode: EM run with one process per core */
   
-  int pkt_io;         /**< Packet I/O: enable=1, disable=0 */
+  int thread_per_core;  /**< RunMode: EM run with one thread per core */
   
-  int evt_timer;      /**< Event Timer: enable=1, disable=0 */
+  int core_count;       /**< Number of EM-cores (== number of EM-threads or number of EM-processes) */
   
+  int proc_idx;         /**< EM process index (thread-mode=0, process-mode=[0 ... core_count-1]) */
+
+  em_core_mask_t phys_mask;
+    
   /* Add further as needed. */
    
 } em_conf_t;

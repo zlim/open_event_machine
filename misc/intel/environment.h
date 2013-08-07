@@ -55,12 +55,11 @@ extern "C" {
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
+#include <rte_errno.h>
 
-#ifndef RTE_EXEC_ENV_BAREMETAL
-  #include <pthread.h>
-#else
-  #error "No Core Sync Barrier yet implemented for BareMetal!"
-#endif
+
+#include <pthread.h>
+
 
 #include "event_machine_helper.h"
 
@@ -76,18 +75,9 @@ extern "C" {
 
 
 /**
- * Core SHARED global variables
+ * Thread local vars
  */
-#define ENV_SHARED  // Global shared variables by default on intel
-
-/**
- * Core LOCAL global variables
- */
-#ifdef RTE_EXEC_ENV_BAREMETAL
-  #define ENV_LOCAL __attribute__ ((section (".per_core")))
-#else
-  #define ENV_LOCAL __thread 
-#endif
+#define ENV_LOCAL __thread
 
 
 
@@ -186,33 +176,54 @@ static inline int64_t env_atomic_add_return(env_atomic_t *ptr, int64_t add_val)
 
 
 /**
- * map memory allocation routines
- *
+ * Memory allocation routines
  */
 
-// static inline void *env_shared_malloc(size_t size)
-// {
-//     return NULL;
-// }
-// 
-// static inline void env_shared_free(void *buf)
-// {
-//     
-// }
+/**
+ * Reserve hugepage memory (static allocation) that can be shared by multiple processes.
+ *
+ * @note Memory reserved with env_shared_reserve() can NOT be unreserved.
+ * Use at initialization time only.
+ * 
+ * @param name   
+ * @param size  
+ * 
+ */
+void *
+env_shared_reserve(const char *name, size_t size);
 
 
+/**
+ * Lookup shared hugepage memory previously reserved by env_shared_reserve().
+ * 
+ * @note Memory reserved with env_shared_reserve() can NOT be unreserved.
+ * Use at initialization time only.
+ *
+ * @param name  
+ * 
+ * @see env_shared_reserve()
+ */
+void *
+env_shared_lookup(const char *name);
 
-static inline void *env_local_malloc(size_t size)
-{
-    return rte_malloc("env_local_malloc", size, 0);
-}
+
+/**
+ * Allocate shared hugepage memory.
+ * 
+ * @note Not for use in the fast path, func call overhead might be too much.
+ *       Buffers allocated at setup can be used in fast path processing though.
+ */
+void *
+env_shared_malloc(size_t size);
 
 
-
-static inline void env_local_free(void *buf)
-{
-    rte_free(buf);
-}
+/**
+ * Frees memory previously allocated by env_shared_malloc()
+ *
+ * @note Not for use in the fast path, func call overhead might be too much.
+ */
+void
+env_shared_free(void *buf);
 
 
 
@@ -301,14 +312,16 @@ static inline uint64_t env_core_hz(void)
 
 
 
-#ifndef RTE_EXEC_ENV_BAREMETAL /* Linux */
-
+/*
+ * Barrier Synchronization
+ */
 typedef struct env_barrier_t
 {
-  pthread_barrier_t  pthread_barrier;
+  pthread_barrier_t     pthread_barrier; 
+  
+  pthread_barrierattr_t pthread_barrierattr; 
   
 } env_barrier_t;
-
 
 
 static inline void env_barrier_init(env_barrier_t* barrier, uint64_t core_mask)
@@ -320,36 +333,16 @@ static inline void env_barrier_init(env_barrier_t* barrier, uint64_t core_mask)
   mask.u64[0] = core_mask;
   core_count  = em_core_mask_count(&mask);
   
-  pthread_barrier_init(&barrier->pthread_barrier, NULL, core_count);
+  (void) pthread_barrierattr_init(&barrier->pthread_barrierattr);
+  (void) pthread_barrierattr_setpshared(&barrier->pthread_barrierattr, PTHREAD_PROCESS_SHARED);
+  (void) pthread_barrier_init(&barrier->pthread_barrier, &barrier->pthread_barrierattr, core_count);
 }
-
 
 
 static inline void env_barrier_sync(env_barrier_t* barrier)
 {
-  pthread_barrier_wait(&barrier->pthread_barrier);
+  (void) pthread_barrier_wait(&barrier->pthread_barrier);
 }
-
-#else // RTE_EXEC_ENV_BAREMETAL defined
-
-typedef struct env_barrier_t
-{
-  uint64_t core_mask;
-  
-} env_barrier_t;
-
-
-static inline void env_barrier_init(env_barrier_t* barrier, uint64_t core_mask)
-{
-  
-}
-
-static inline void env_barrier_sync(env_barrier_t* barrier)
-{
-  
-}
-  
-#endif // RTE_EXEC_ENV_BAREMETAL
 
 
 

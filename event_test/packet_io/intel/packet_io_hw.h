@@ -68,7 +68,7 @@ extern "C" {
 #include "em_intel.h"
 #include "em_intel_packet.h"
 #include "intel_hw_init.h"
-
+#include "em_intel_inline.h"
 
 
 /*
@@ -82,13 +82,12 @@ COMPILE_TIME_ASSERT(sizeof(struct udp_hdr)   == sizeof(udp_hdr_t), UDP_HDR_SIZE_
 /*
  * Defines
  */
-#define  PAD_CACHE_LINE_MULT (9)
 
 
 
 
 /**
- * Events:
+ * Data types
  */
 
 
@@ -127,6 +126,7 @@ static inline uint32_t packet_io_packet_size(const void* desc)
 }
 
 
+/** Send packet buffer out through port='ipd_port'. Note same as packet_io_send_and_free() on many platforms. */
 static inline void
 packet_io_send(em_event_t event, const int ipd_port)
 {
@@ -134,6 +134,7 @@ packet_io_send(em_event_t event, const int ipd_port)
 }
 
 
+/** Free packet buffer - NOTE! Not needed after an packet_io_send() - buf is automatically freed */
 static inline void
 packet_io_free(em_event_t event)
 {
@@ -143,6 +144,10 @@ packet_io_free(em_event_t event)
 }
 
 
+/** 
+  * Send (and free) a packet buffer - NOTE! same as packet_io_send() on many platforms
+  * because the buffer is automatically freed by the lib or HW.
+  */
 static inline void
 packet_io_send_and_free(em_event_t event, const int ipd_port)
 {

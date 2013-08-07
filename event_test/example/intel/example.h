@@ -42,37 +42,15 @@
 extern "C" {
 #endif
 
-
-
-#define EXAMPLE_NAME_LEN  (32)
-
-/* Get rid of path in filename - only for unix-type paths using '/' */
-#define NO_PATH(file_name) (strrchr((file_name), '/') ? strrchr((file_name), '/') + 1 : (file_name))
+#include "test_common.h"
 
 
 
 /**
- * Application configuration
- */
-typedef struct
-{
-  char name[EXAMPLE_NAME_LEN]; /**< application name */
-  
-  unsigned num_procs;          /**< for future use */
-                               
-  unsigned num_threads;        /**< for future use */
-  
-  /* Add further if needed */
-  
-} example_conf_t;
-
-
-
-/**
- * All examples implement the test_init() function to keep a common main() and example_start()
+ * All examples implement the test_init() function to keep a common main() and application_start()
  */
 void
-test_init(example_conf_t *const example_conf);
+test_init(appl_conf_t *const appl_conf);
 
 
 

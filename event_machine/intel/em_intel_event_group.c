@@ -32,12 +32,8 @@
 #include "em_intel_event_group.h"
 #include "em_error.h"
 
+#include "em_shared_data.h"
 
-// event group entry table (em_event_group_t used as index into table)
-ENV_SHARED  em_event_group_entry_t           em_event_group_entry_tbl[EM_MAX_EVENT_GROUPS]  ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  em_event_group_entry_tbl_lock_t  em_event_group_entry_tbl_lock                  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(em_event_group_entry_tbl) % ENV_CACHE_LINE_SIZE) == 0, EM_EVENT_GROUP_ENTRY_TBL_SIZE_ERROR);
 
 
 /**
@@ -48,9 +44,9 @@ event_group_alloc_init(void)
 {
   printf("event group init\n");
 
-  (void) memset(em_event_group_entry_tbl, 0, sizeof(em_event_group_entry_tbl));
+  (void) memset(em.shm->em_event_group_entry_tbl, 0, sizeof(em_event_group_entry_t) * EM_MAX_EVENT_GROUPS);
 
-  env_spinlock_init(&em_event_group_entry_tbl_lock.u.lock);
+  env_spinlock_init(&em.shm->em_event_group_entry_tbl_lock.u.lock);
 }
 
 
@@ -70,21 +66,21 @@ event_group_next_free(void)
   event_group = EM_EVENT_GROUP_UNDEF;
 
 
-  env_spinlock_lock(&em_event_group_entry_tbl_lock.u.lock);
+  env_spinlock_lock(&em.shm->em_event_group_entry_tbl_lock.u.lock);
 
 
   for(i = 0; i < EM_MAX_EVENT_GROUPS; i++)
   {
-    if(em_event_group_entry_tbl[i].allocated == 0)
+    if(em.shm->em_event_group_entry_tbl[i].allocated == 0)
     {
-      em_event_group_entry_tbl[i].allocated = 1;
+      em.shm->em_event_group_entry_tbl[i].allocated = 1;
       event_group = i;
       break;
     }
   }
 
 
-  env_spinlock_unlock(&em_event_group_entry_tbl_lock.u.lock);
+  env_spinlock_unlock(&em.shm->em_event_group_entry_tbl_lock.u.lock);
 
 
   return event_group;
@@ -130,11 +126,11 @@ em_event_group_delete(em_event_group_t event_group)
   RETURN_ERROR_IF(invalid_egrp(event_group), EM_ERR_BAD_ID, EM_ESCOPE_EVENT_GROUP_DELETE,
                   "Invalid event group: %"PRI_EGRP"", event_group);
 
-  env_spinlock_lock(&em_event_group_entry_tbl_lock.u.lock);
+  env_spinlock_lock(&em.shm->em_event_group_entry_tbl_lock.u.lock);
 
-  em_event_group_entry_tbl[event_group].allocated = 0;
+  em.shm->em_event_group_entry_tbl[event_group].allocated = 0;
 
-  env_spinlock_unlock(&em_event_group_entry_tbl_lock.u.lock);
+  env_spinlock_unlock(&em.shm->em_event_group_entry_tbl_lock.u.lock);
 
 
   return EM_OK;
@@ -171,7 +167,7 @@ em_event_group_apply(em_event_group_t event_group, int count, int num_notif, con
                   "Invalid event group: %"PRI_EGRP"", event_group);
   
   
-  group_e = &em_event_group_entry_tbl[event_group];
+  group_e = &em.shm->em_event_group_entry_tbl[event_group];
 
 
   RETURN_ERROR_IF(group_e->count != 0, EM_ERR_NOT_FREE, EM_ESCOPE_EVENT_GROUP_APPLY,
@@ -227,7 +223,7 @@ em_event_group_increment(int count)
                   "No current event group (%"PRI_EGRP")", event_group);
 
 
-  group_e = &em_event_group_entry_tbl[event_group];
+  group_e = &em.shm->em_event_group_entry_tbl[event_group];
 
 
   ret = 0;
@@ -262,6 +258,66 @@ em_event_group_current(void)
 {
   return em_core_local.current_event_group;
 }
+
+
+
+/**
+ * Updates the event group count
+ * 
+ * Updates the event count of the event group. Only called by the
+ * EM-dispatcher to track when to send the notifications when the
+ * event group is done.
+ *
+ * @param group_e       Pointer to an event group entry
+ *
+ * @return EM_OK if successful.
+ */
+void
+event_group_count_update(em_event_group_t event_group)
+{
+  em_event_group_entry_t *const group_e = &em.shm->em_event_group_entry_tbl[event_group];
+  
+  uint64_t old, new;
+  int      ret;
+  
+
+  env_sync_mem();
+
+  ret = 0;
+
+  do
+  {
+    old = group_e->count;
+
+    IF_UNLIKELY(old == 0)
+    {
+      (void) EM_INTERNAL_ERROR(EM_ERR_BAD_ID, EM_ESCOPE_EVENT_GROUP_UPDATE,
+                               "Group count already 0!\n");
+      return;
+    }
+
+    new = old - 1;
+
+    ret = rte_atomic64_cmpset(&group_e->count, old, new);
+  }
+  while(ret == 0);
+
+
+
+  if(new == 0)
+  { // Last event in the group
+
+    int i;
+
+    for(i = 0; i < group_e->num_notif; i++)
+    {
+      em_send(group_e->notif_tbl[i].event, group_e->notif_tbl[i].queue);
+    }
+  }
+
+  return;
+}
+
 
 
 /**

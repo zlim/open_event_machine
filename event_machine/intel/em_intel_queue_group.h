@@ -92,9 +92,7 @@ typedef struct
 /*
  * Externs
  */
-
-extern ENV_SHARED  em_queue_group_element_t  em_queue_group[EM_MAX_QUEUE_GROUPS];
-extern ENV_SHARED  em_spinlock_t             em_queue_group_lock;
+ 
 
 
 /*

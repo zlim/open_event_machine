@@ -53,9 +53,12 @@
 #endif
 
 #include "intel_hw_init.h"
-#include "intel_alloc.h"
 
 #include "multiring.h"
+
+#include "em_shared_data.h"
+#include "em_intel_inline.h"
+
 
 
 #define  SCHED_QS_MASK                       (SCHED_QS - 1)
@@ -64,106 +67,14 @@ COMPILE_TIME_ASSERT(POWEROF2(SCHED_QS), SCHED_QS__NOT_POWER_OF_TWO);
 #define  SCHED_Q_QUEUE_MASK                  (SCHED_Q_MAX_QUEUES - 1)
 COMPILE_TIME_ASSERT(POWEROF2(SCHED_Q_MAX_QUEUES), SCHED_QS_MAX_QUEUES__NOT_POWER_OF_TWO);
 
-#define  SCHED_Q_ATOMIC_SELECT(q_elem)       (&sched_qs_prio.sched_q_atomic[(q_elem)->queue_group])
-#define  SCHED_Q_PARALLEL_SELECT(q_elem)     (&sched_qs_prio.sched_q_parallel[(q_elem)->queue_group])
-#define  SCHED_Q_PARALLEL_ORD_SELECT(q_elem) (&sched_qs_prio.sched_q_parallel_ord[(q_elem)->queue_group])
+#define  SCHED_Q_ATOMIC_SELECT(q_elem)       (&em.shm->sched_qs_prio.sched_q_atomic[(q_elem)->queue_group])
+#define  SCHED_Q_PARALLEL_SELECT(q_elem)     (&em.shm->sched_qs_prio.sched_q_parallel[(q_elem)->queue_group])
+#define  SCHED_Q_PARALLEL_ORD_SELECT(q_elem) (&em.shm->sched_qs_prio.sched_q_parallel_ord[(q_elem)->queue_group])
 
 
 
 #define PARALLEL_ORDERED__USE_SCHED_Q_LOCKS  (0) // 0=default=use Q-locks to maintain order, 1=use sched-Q locks to maintain order
 
-
-
-/**
- * Scheduling queue for atomic EM-queues
- */
-typedef struct
-{
-  int               nbr_queues;
-
-  uint64_t          queue_mask;
-
-  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
-
-} sched_q_atomic_t;
-
-
-/**
- * Scheduling queue for parallel EM-queues
- */
-typedef struct
-{
-  int               nbr_queues;
-
-  uint64_t          queue_mask;
-
-  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
-
-} sched_q_parallel_t;
-
-
-/**
- * Scheduling queue for parallel-ordered EM-queues
- */
-typedef struct
-{
-  int               nbr_queues  ENV_CACHE_LINE_ALIGNED;
-
-  uint64_t          queue_mask;
-
-  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
-
-
-  union
-  {
-    env_spinlock_t  lock ENV_CACHE_LINE_ALIGNED;
-
-    uint8_t         u8[ENV_CACHE_LINE_SIZE];
-
-  } locks[SCHED_Q_MAX_QUEUES];
-
-
-} sched_q_parallel_ord_t ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(sched_q_parallel_ord_t) % ENV_CACHE_LINE_SIZE) == 0, SCHED_Q_PARALLEL_ORD_SIZE_ERROR);
-
-
-
-/**
- * Scheduling queues per priority level
- */
-typedef struct
-{
-  sched_q_atomic_t        sched_q_atomic[SCHED_QS]        ENV_CACHE_LINE_ALIGNED;
-
-  sched_q_parallel_t      sched_q_parallel[SCHED_QS]      ENV_CACHE_LINE_ALIGNED;
-
-  sched_q_parallel_ord_t  sched_q_parallel_ord[SCHED_QS]  ENV_CACHE_LINE_ALIGNED;
-
-} sched_qs_t  ENV_CACHE_LINE_ALIGNED;
-
-
-
-/**
- * All scheduling queues
- */
-static ENV_SHARED  sched_qs_t  sched_qs_prio  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(sched_qs_prio) % ENV_CACHE_LINE_SIZE) == 0, SCHED_QS_PRIO_SIZE_ERROR);
-
-
-
-
-/**
- * The cores' queue group masks used in scheduling, cores accesses array based on EM core ID (reads). Updates can be done by any core
- */
-static ENV_SHARED  core_sched_masks_t       core_sched_masks[MAX_CORES]      ENV_CACHE_LINE_ALIGNED;
-static ENV_SHARED  core_sched_add_counts_t  core_sched_add_counts[MAX_CORES] ENV_CACHE_LINE_ALIGNED;
-static ENV_SHARED  sched_add_counts_lock_t  sched_add_counts_lock            ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(core_sched_masks_t)     % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_MASKS_T_SIZE_ERROR);
-COMPILE_TIME_ASSERT((sizeof(core_sched_masks)       % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_MASKS_ARR_SIZE_ERROR);
-COMPILE_TIME_ASSERT((sizeof(core_sched_add_counts)  % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_COUNTS_ARR_SIZE_ERROR);
 
 
 /*
@@ -213,9 +124,9 @@ typedef union
   {
     int64_t                  events_enqueued;  /**< Core local number of succesful event enqueues (for sched-rounds approx.) */
     
-    core_sched_masks_t      *sched_masks;      /**< Core local pointer to &core_sched_masks[core] */
+    core_sched_masks_t      *sched_masks;      /**< Core local pointer to &em.shm->core_sched_masks[core] */
 
-    core_sched_add_counts_t *sched_add_counts; /**< Core local pointer to &core_sched_add_counts[core] */
+    core_sched_add_counts_t *sched_add_counts; /**< Core local pointer to &em.shm->core_sched_add_counts[core] */
 
     sched_qs_info_local_t    sched_qs_info;    /**< Core local sched queue info (indexes, sched-counts etc.) */
   };
@@ -349,11 +260,11 @@ em_dispatch(uint32_t rounds)
 void
 sched_init_global_1(void) 
 {
-  (void) memset(&sched_qs_prio,         0, sizeof(sched_qs_prio));
-  (void) memset( core_sched_masks,      0, sizeof(core_sched_masks));     
-  (void) memset( core_sched_add_counts, 0, sizeof(core_sched_add_counts));
+  (void) memset(&em.shm->sched_qs_prio,         0, sizeof(em.shm->sched_qs_prio));
+  (void) memset( em.shm->core_sched_masks,      0, sizeof(em.shm->core_sched_masks));     
+  (void) memset( em.shm->core_sched_add_counts, 0, sizeof(em.shm->core_sched_add_counts));
   
-  env_spinlock_init(&sched_add_counts_lock.lock);
+  env_spinlock_init(&em.shm->sched_add_counts_lock.lock);
 }
 
 
@@ -375,9 +286,9 @@ sched_init_global_2(void)
   num_cores = em_core_count();
 
 
-  sched_q_atomic       = sched_qs_prio.sched_q_atomic;
-  sched_q_parallel     = sched_qs_prio.sched_q_parallel;
-  sched_q_parallel_ord = sched_qs_prio.sched_q_parallel_ord;
+  sched_q_atomic       = em.shm->sched_qs_prio.sched_q_atomic;
+  sched_q_parallel     = em.shm->sched_qs_prio.sched_q_parallel;
+  sched_q_parallel_ord = em.shm->sched_qs_prio.sched_q_parallel_ord;
 
   printf("  Initialize SchedQs:\n");
 
@@ -503,8 +414,8 @@ sched_init_local(void)
   (void) memset(&sched_core_local, 0, sizeof(sched_core_local));
   
   // Set core-local pointer to the sched masks & counts.
-  sched_core_local.sched_masks      = &core_sched_masks[core];
-  sched_core_local.sched_add_counts = &core_sched_add_counts[core];
+  sched_core_local.sched_masks      = &em.shm->core_sched_masks[core];
+  sched_core_local.sched_add_counts = &em.shm->core_sched_add_counts[core];
   
 
   sched_core_local.sched_qs_info.sched_q_atomic_idx 
@@ -593,7 +504,7 @@ em_schedule_queues(void)
 {
   int ev_a = 0, ev_p = 0, ev_po = 0;
 
-  sched_qs_t            *const sched_qs_ptr  = &sched_qs_prio;
+  sched_qs_t            *const sched_qs_ptr  = &em.shm->sched_qs_prio;
   sched_qs_info_local_t *const sched_qs_info = &sched_core_local.sched_qs_info;
   sched_masks_t         *const sched_masks   = &sched_core_local.sched_masks->sched_masks_prio;
 
@@ -711,7 +622,7 @@ em_schedule_atomic(sched_q_atomic_t              sched_q_atomic[],
 
       IF_LIKELY(ret == 0)
       {
-        int i;
+        unsigned i;
 
         //
         // Dispatch events
@@ -1245,7 +1156,7 @@ sched_masks_add_queue(const em_queue_t       queue,
   core_count = em_core_count();
 
 
-  env_spinlock_lock(&sched_add_counts_lock.lock);
+  env_spinlock_lock(&em.shm->sched_add_counts_lock.lock);
   
   // printf("%s(): Core:%02i QGrp:%"PRI_QGRP" CoreMask:%"PRIX64"\n", __func__, em_core_id(), group, core_mask.u64[0]); fflush(NULL);
 
@@ -1255,91 +1166,91 @@ sched_masks_add_queue(const em_queue_t       queue,
     {
       if(type == EM_QUEUE_TYPE_ATOMIC)
       {
-        sched_q_atomic_t *const sched_q_obj = &sched_qs_prio.sched_q_atomic[group];
+        sched_q_atomic_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_atomic[group];
           
         qidx = queue & (sched_q_obj->queue_mask);        
         
-        qidx_count = core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx];
-        core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx];
+        em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
         
         if(qidx_count == 0)
         {
           qidx_mask_bit = (uint16_t) (1 << qidx);
           
           // Set the bit QIDX bit, i.e. enable scheduling for the FIFO that the EM-queue is scheduled through
-          core_sched_masks[core].sched_masks_prio.atomic_masks.qidx_mask[group] |= qidx_mask_bit;
+          em.shm->core_sched_masks[core].sched_masks_prio.atomic_masks.qidx_mask[group] |= qidx_mask_bit;
         }
         
         // Increase the queue count for this sched object
-        count = core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt;
-        core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = count + 1;        
+        count = em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt;
+        em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = count + 1;        
         
         if(count == 0)
         {
           // Set the mask bit for this sched object, i.e. enable scheduling for this type,group
-          group_mask_set(&core_sched_masks[core].sched_masks_prio.atomic_masks.q_grp_mask, group);
+          group_mask_set(&em.shm->core_sched_masks[core].sched_masks_prio.atomic_masks.q_grp_mask, group);
         }
         
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL)
       {
-        sched_q_parallel_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel[group];
+        sched_q_parallel_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel[group];
           
         qidx = queue & (sched_q_obj->queue_mask);        
         
-        qidx_count = core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx];
-        core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx];
+        em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
         
         if(qidx_count == 0)
         {        
           qidx_mask_bit = (uint16_t) (1 << qidx);
           
           // Set the bit QIDX bit, i.e. enable scheduling for the FIFO that the EM-queue is scheduled through
-          core_sched_masks[core].sched_masks_prio.parallel_masks.qidx_mask[group] |= qidx_mask_bit;
+          em.shm->core_sched_masks[core].sched_masks_prio.parallel_masks.qidx_mask[group] |= qidx_mask_bit;
         }
         
         // Increase the queue count for this sched object
-        count = core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt;
-        core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = count + 1;
+        count = em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt;
+        em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = count + 1;
 
         if(count == 0) 
         {
           // Set the mask bit for this sched object, i.e. enable scheduling for this type,group
-          group_mask_set(&core_sched_masks[core].sched_masks_prio.parallel_masks.q_grp_mask, group);
+          group_mask_set(&em.shm->core_sched_masks[core].sched_masks_prio.parallel_masks.q_grp_mask, group);
         }
 
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL_ORDERED)
       {
-        sched_q_parallel_ord_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel_ord[group];
+        sched_q_parallel_ord_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel_ord[group];
 
         qidx = queue & (sched_q_obj->queue_mask);
         
-        qidx_count = core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx];
-        core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx];
+        em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = qidx_count + 1;
         
         if(qidx_count == 0)
         {                
           qidx_mask_bit = (uint16_t) (1 << qidx);
 
           // Set the bit QIDX bit, i.e. enable scheduling for the FIFO that the EM-queue is scheduled through
-          core_sched_masks[core].sched_masks_prio.parallel_ord_masks.qidx_mask[group] |= qidx_mask_bit;
+          em.shm->core_sched_masks[core].sched_masks_prio.parallel_ord_masks.qidx_mask[group] |= qidx_mask_bit;
         }
 
         // Increase the queue count for this sched object
-        count = core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt;
-        core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = count + 1;
+        count = em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt;
+        em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = count + 1;
 
         if(count == 0)
         {
           // Set the mask bit for this sched object, i.e. enable scheduling for this type,group
-          group_mask_set(&core_sched_masks[core].sched_masks_prio.parallel_ord_masks.q_grp_mask, group);
+          group_mask_set(&em.shm->core_sched_masks[core].sched_masks_prio.parallel_ord_masks.q_grp_mask, group);
         }
 
       }
       else
       {
-        env_spinlock_unlock(&sched_add_counts_lock.lock);
+        env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
         
         return EM_INTERNAL_ERROR(EM_ERR_NOT_FOUND, EM_ESCOPE_SCHED_MASKS_ADD,
                                  "Unknown EM-queue type (%u)", type);
@@ -1349,7 +1260,7 @@ sched_masks_add_queue(const em_queue_t       queue,
   } // for(;;)
 
 
-  env_spinlock_unlock(&sched_add_counts_lock.lock);
+  env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
 
   return EM_OK;
 }
@@ -1392,7 +1303,7 @@ sched_masks_rem_queue(const em_queue_t       queue,
   }
 
 
-  env_spinlock_lock(&sched_add_counts_lock.lock);
+  env_spinlock_lock(&em.shm->sched_add_counts_lock.lock);
   
 
   for(core = 0; core < core_count; core++)
@@ -1401,108 +1312,108 @@ sched_masks_rem_queue(const em_queue_t       queue,
     {
       if(type == EM_QUEUE_TYPE_ATOMIC)
       {
-        sched_q_atomic_t *const sched_q_obj = &sched_qs_prio.sched_q_atomic[group];
+        sched_q_atomic_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_atomic[group];
         
         qidx = queue & (sched_q_obj->queue_mask);
 
-        count      = core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt;
-        qidx_count = core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx];
+        count      = em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx];
 
         // Decrease qidx count and if needed clear associated bit to remove from scheduling
         if(qidx_count > 1)
         {
-          core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
+          em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
         }
         else if(qidx_count == 1)
         {
-          core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = 0;
+          em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].qidx_cnt[qidx] = 0;
           
           qidx_mask_bit = (uint16_t) (1 << qidx);
-          core_sched_masks[core].sched_masks_prio.atomic_masks.qidx_mask[group] &= (~qidx_mask_bit);
+          em.shm->core_sched_masks[core].sched_masks_prio.atomic_masks.qidx_mask[group] &= (~qidx_mask_bit);
         }
         
         // Decrease sched obj count and if needed disable scheduling for this group by clearing the bit
         if(count > 1)
         {
-          core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = count - 1;
+          em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = count - 1;
         }
         else if(count == 1)
         {
-          core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = 0;
-          group_mask_clr(&core_sched_masks[core].sched_masks_prio.atomic_masks.q_grp_mask, group);
+          em.shm->core_sched_add_counts[core].add_count.atomic_add_cnt[group].q_grp_cnt = 0;
+          group_mask_clr(&em.shm->core_sched_masks[core].sched_masks_prio.atomic_masks.q_grp_mask, group);
         }
         
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL)
       {
-        sched_q_parallel_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel[group];
+        sched_q_parallel_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel[group];
         
         qidx = queue & (sched_q_obj->queue_mask);
 
-        count      = core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt;
-        qidx_count = core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx];
+        count      = em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx];
 
         // Decrease qidx count and if needed clear associated bit to remove from scheduling
         if(qidx_count > 1)
         {
-          core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
+          em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
         }
         else if(qidx_count == 1)
         {
-          core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = 0;
+          em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].qidx_cnt[qidx] = 0;
           
           qidx_mask_bit = (uint16_t) (1 << qidx);
-          core_sched_masks[core].sched_masks_prio.parallel_masks.qidx_mask[group] &= (~qidx_mask_bit);
+          em.shm->core_sched_masks[core].sched_masks_prio.parallel_masks.qidx_mask[group] &= (~qidx_mask_bit);
         }
         
         // Decrease sched obj count and if needed disable scheduling for this group by clearing the bit
         if(count > 1)
         {
-          core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = count - 1;
+          em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = count - 1;
         }
         else if(count == 1)
         {
-          core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = 0;
-          group_mask_clr(&core_sched_masks[core].sched_masks_prio.parallel_masks.q_grp_mask, group);
+          em.shm->core_sched_add_counts[core].add_count.parallel_add_cnt[group].q_grp_cnt = 0;
+          group_mask_clr(&em.shm->core_sched_masks[core].sched_masks_prio.parallel_masks.q_grp_mask, group);
         }
         
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL_ORDERED)
       {
-        sched_q_parallel_ord_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel_ord[group];
+        sched_q_parallel_ord_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel_ord[group];
         
         qidx = queue & (sched_q_obj->queue_mask);
 
-        count      = core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt;
-        qidx_count = core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx];
+        count      = em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt;
+        qidx_count = em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx];
 
         // Decrease qidx count and if needed clear associated bit to remove from scheduling
         if(qidx_count > 1)
         {
-          core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
+          em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = qidx_count - 1;
         }
         else if(qidx_count == 1)
         {
-          core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = 0;
+          em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].qidx_cnt[qidx] = 0;
           
           qidx_mask_bit = (uint16_t) (1 << qidx);
-          core_sched_masks[core].sched_masks_prio.parallel_ord_masks.qidx_mask[group] &= (~qidx_mask_bit);
+          em.shm->core_sched_masks[core].sched_masks_prio.parallel_ord_masks.qidx_mask[group] &= (~qidx_mask_bit);
         }
         
         // Decrease sched obj count and if needed disable scheduling for this group by clearing the bit
         if(count > 1)
         {
-          core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = count - 1;
+          em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = count - 1;
         }
         else if(count == 1)
         {
-          core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = 0;
-          group_mask_clr(&core_sched_masks[core].sched_masks_prio.parallel_ord_masks.q_grp_mask, group);
+          em.shm->core_sched_add_counts[core].add_count.parallel_ord_add_cnt[group].q_grp_cnt = 0;
+          group_mask_clr(&em.shm->core_sched_masks[core].sched_masks_prio.parallel_ord_masks.q_grp_mask, group);
         }
         
       }
       else{
-        env_spinlock_unlock(&sched_add_counts_lock.lock);
+        env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
         
         return EM_INTERNAL_ERROR(EM_ERR_NOT_FOUND, EM_ESCOPE_SCHED_MASKS_REM,
                                  "Unknown EM-queue type (%u)", type);
@@ -1511,7 +1422,7 @@ sched_masks_rem_queue(const em_queue_t       queue,
   } // for(;;)
 
   
-  env_spinlock_unlock(&sched_add_counts_lock.lock);
+  env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
 
   return EM_OK;
 }
@@ -1534,15 +1445,15 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
   uint16_t            qidx_mask_bit;
 
 
-  env_spinlock_lock(&em_queue_group_lock.lock);
-  env_spinlock_lock(&sched_add_counts_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->sched_add_counts_lock.lock);
 
   
   /*
    * Loop through the queues that belong to this queue group
    * and modify scheduling information locally on this core.
    */
-  m_list_for_each(&em_queue_group[group].list_head, pos, qgrp_node)
+  m_list_for_each(&em.shm->em_queue_group[group].list_head, pos, qgrp_node)
   {
     q_elem = m_list_qgrp_node_to_queue_elem(qgrp_node);
    
@@ -1554,7 +1465,7 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
       
       if(type == EM_QUEUE_TYPE_ATOMIC)
       {
-        sched_q_atomic_t *const sched_q_obj = &sched_qs_prio.sched_q_atomic[group];
+        sched_q_atomic_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_atomic[group];
           
         qidx = queue & (sched_q_obj->queue_mask);        
         
@@ -1576,7 +1487,7 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL)
       {
-        sched_q_parallel_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel[group];
+        sched_q_parallel_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel[group];
           
         qidx = queue & (sched_q_obj->queue_mask);        
         
@@ -1598,7 +1509,7 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
       }
       else if(type == EM_QUEUE_TYPE_PARALLEL_ORDERED)
       {
-        sched_q_parallel_ord_t *const sched_q_obj = &sched_qs_prio.sched_q_parallel_ord[group];
+        sched_q_parallel_ord_t *const sched_q_obj = &em.shm->sched_qs_prio.sched_q_parallel_ord[group];
           
         qidx = queue & (sched_q_obj->queue_mask);        
         
@@ -1620,8 +1531,8 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
       }
       else
       {
-        env_spinlock_unlock(&sched_add_counts_lock.lock);
-        env_spinlock_unlock(&em_queue_group_lock.lock);  
+        env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
+        env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);  
         
         EM_INTERNAL_ERROR(EM_ERR_NOT_FOUND, EM_ESCOPE_SCHED_MASKS_ADD,
                           "Unknown EM-queue type (%u)", type);
@@ -1631,8 +1542,8 @@ sched_masks_add_queue_group__local(const em_queue_group_t group)
     }
   }
   
-  env_spinlock_unlock(&sched_add_counts_lock.lock);
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 }
 
 
@@ -1648,7 +1559,7 @@ sched_masks_rem_queue_group__local(const em_queue_group_t grp)
   int qidx;
   
   
-  env_spinlock_lock(&sched_add_counts_lock.lock);
+  env_spinlock_lock(&em.shm->sched_add_counts_lock.lock);
   
   group_mask_clr(&sched_core_local.sched_masks->sched_masks_prio.atomic_masks.q_grp_mask,       grp);
   group_mask_clr(&sched_core_local.sched_masks->sched_masks_prio.parallel_masks.q_grp_mask,     grp);
@@ -1670,7 +1581,7 @@ sched_masks_rem_queue_group__local(const em_queue_group_t grp)
     sched_core_local.sched_add_counts->add_count.parallel_ord_add_cnt[grp].qidx_cnt[qidx] = 0;
   }
   
-  env_spinlock_unlock(&sched_add_counts_lock.lock);
+  env_spinlock_unlock(&em.shm->sched_add_counts_lock.lock);
 }
 
 

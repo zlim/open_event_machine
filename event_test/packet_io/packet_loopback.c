@@ -137,12 +137,13 @@
  * Macros
  */
 
-#define ERROR_PRINT(...)     {printf("ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
-                              printf(__VA_ARGS__); fflush(NULL); abort();}
+#define ERROR_PRINT(...)     {fprintf(stderr, "ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
+                              fprintf(stderr, __VA_ARGS__); fflush(stderr); /*abort();*/}
 
 #define IS_ERROR(cond, ...)    \
   if(ENV_UNLIKELY( (cond) )) { \
     ERROR_PRINT(__VA_ARGS__);  \
+    abort();                   \
   }
 
 #define IS_ODD(x)   (((x) & 0x1))
@@ -172,7 +173,6 @@ typedef struct
  * Save the dst IP, protocol and port in the queue-context,
  * verify (if error checking enabled) that received packet matches the configuration for the queue.
  */
-
 typedef struct flow_params_
 {
   uint32_t ipv4;
@@ -214,17 +214,26 @@ COMPILE_TIME_ASSERT(sizeof(queue_context_t) == ENV_CACHE_LINE_SIZE, Q_CTX_CACHE_
 
 
 
+
 /**
- * Global Variables
+ * Packet Loopback shared memory 
  */
- 
-// EO (application) context
-ENV_SHARED static  eo_context_t  EO_ctx  ENV_CACHE_LINE_ALIGNED;
+typedef struct
+{
+  // EO (application) context
+  eo_context_t  EO_ctx  ENV_CACHE_LINE_ALIGNED;
+  
+  // Array containing the contexts of all the queues handled by the EO
+  // A queue context contains the flow/queue specific data for the application EO.
+  queue_context_t  EO_q_ctx[NUM_QUEUES]  ENV_CACHE_LINE_ALIGNED;
+  
+} packet_loopback_shm_t;
+
+COMPILE_TIME_ASSERT((sizeof(packet_loopback_shm_t) % ENV_CACHE_LINE_SIZE) == 0, PACKET_LOOPBACK_SHM_T__SIZE_ERROR);
 
 
-// Array containing the contexts of all the queues handled by the EO
-// A queue context contains the flow/queue specific data for the application EO.
-ENV_SHARED static  queue_context_t  EO_q_ctx[NUM_QUEUES]  ENV_CACHE_LINE_ALIGNED;
+/** EM-core local pointer to shared memory */
+static ENV_LOCAL packet_loopback_shm_t *pkt_shm = NULL;
 
 
 
@@ -263,24 +272,37 @@ ipaddr_tostr(uint32_t ip_addr, char *const ip_addr_str__out);
 /**
  * Init and startup of the Packet Loopback test application.
  *
- * @see main() and packet_io_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(packet_io_conf_t *const packet_io_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t       eo;
   eo_context_t *app_eo_ctx;
   
   
+  if(em_core_id() == 0) {
+    pkt_shm = env_shared_reserve("PktLoopShMem", sizeof(packet_loopback_shm_t));
+  }
+  else {
+    pkt_shm = env_shared_lookup("PktLoopShMem");
+  }
+  
+
+  if(pkt_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), 0xdead, "Packet Loopback init failed on EM-core: %u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
     return;
   }
   
-
+  
   printf("\n**********************************************************************\n"
          "EM APPLICATION: '%s' initializing: \n"
          "  %s: %s() - EM-core:%i \n"
@@ -288,18 +310,19 @@ test_init(packet_io_conf_t *const packet_io_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         packet_io_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         packet_io_conf->num_procs,
-         packet_io_conf->num_threads);
-         
+         appl_conf->num_procs,
+         appl_conf->num_threads);
+  
+  
 
   //
   // Create EO
   //
-  app_eo_ctx = &EO_ctx;
+  app_eo_ctx = &pkt_shm->EO_ctx;
 
   eo = em_eo_create("packet_loopback", start, start_local, stop, NULL, receive_packet, app_eo_ctx);
   
@@ -369,7 +392,7 @@ start(void    *eo_ctx,
     em_queue_type_t     queue_type;    
     
     
-    (void) memset(EO_q_ctx, 0, sizeof(EO_q_ctx));
+    (void) memset(pkt_shm->EO_q_ctx, 0, sizeof(pkt_shm->EO_q_ctx));
     
     
     for(i = 0; i < NUM_IP_ADDRS; i++)
@@ -430,7 +453,7 @@ start(void    *eo_ctx,
         IS_ERROR(ret != EM_OK, "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue);
         
         // Set the queue specific application (EO) context
-        q_ctx = &EO_q_ctx[q_ctx_idx];
+        q_ctx = &pkt_shm->EO_q_ctx[q_ctx_idx];
         
         ret = em_queue_set_context(queue, q_ctx);
         IS_ERROR(ret != EM_OK, "EO Queue context assignment failed (%i). EO-ctx: %d, queue: %"PRI_QUEUE"\n", ret, q_ctx_idx, queue);

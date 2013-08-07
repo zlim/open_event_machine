@@ -78,23 +78,20 @@
 #define DELAY_SPIN_COUNT      50000000
 
 
-/**
- * Macros
- */
+
 
 /*
  * Note: The error macros below are NOT proper event machine error handling mechanisms.
  * For better error handling see the API funcs: em_error(), em_register_error_handler(),  
  * em_eo_register_error_handler() etc.
  */
-#define ERROR_PRINT(...)     {printf("ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
-                              printf(__VA_ARGS__); fflush(NULL); abort();}
+#define ERROR_PRINT(...)     {fprintf(stderr, "\nAPPL ERROR: %s %s(line:%d) - EM-core%02i: ", __FILE__, __func__, __LINE__, em_core_id()); \
+                              fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n\n"); abort();}
 
 #define IS_ERROR(cond, ...)    \
   if(ENV_UNLIKELY( (cond) )) { \
     ERROR_PRINT(__VA_ARGS__);  \
   }
-
 
 
 
@@ -123,50 +120,36 @@ typedef struct
 } event_group_test_t;
 
 
+
 /**
  * EO context used by the event group test
  */
-typedef struct
+typedef union
 {
-  /** Event Group Id used by the EO */
-  em_event_group_t event_group;
-  
-  /** The number of events to send using an event group before triggering a notification event */
-  int              event_count;
-
-  /** Accumulator for a dummy sum */
-  uint64_t         acc;
-
-  /** Total test case running time in cycles updated when receiving a notification event */
-  uint64_t         total_cycles;
-
-  /** Number of rounds, i.e. received notifications, during this test case */  
-  uint64_t         total_rounds;
-}eo_context_t;
-
-
-
-/**
- * EO context padded to cache line size.
- */
-typedef union 
-{
-  /** The EO context data */
-  eo_context_t eo_ctx;
+  struct
+  {
+    /** Event Group Id used by the EO */
+    em_event_group_t event_group;
+    
+    /** The number of events to send using an event group before triggering a notification event */
+    int              event_count;
+    
+    /** Accumulator for a dummy sum */
+    uint64_t         acc;
+    
+    /** Total test case running time in cycles updated when receiving a notification event */
+    uint64_t         total_cycles;
+    
+    /** Number of rounds, i.e. received notifications, during this test case */  
+    uint64_t         total_rounds;
+  };
   
   /** Pad EO context to cache line size */
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  uint8_t u8[ENV_CACHE_LINE_SIZE];  
   
-} eo_context_pad_t;
+} eo_context_t;
 
-
-
-
-/** EO context */
-ENV_SHARED  static  eo_context_pad_t  event_group_test_eo_context  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT(sizeof(eo_context_pad_t) == ENV_CACHE_LINE_SIZE, EVENT_GROUP_TEST_EO_CONTEXT_SIZE_ERROR);
-
+COMPILE_TIME_ASSERT(sizeof(eo_context_t) == ENV_CACHE_LINE_SIZE, EVENT_GROUP_TEST_EO_CONTEXT_SIZE_ERROR);
 
 
 
@@ -183,21 +166,30 @@ typedef union
   
 } core_stat_t;
 
+COMPILE_TIME_ASSERT(sizeof(core_stat_t) == ENV_CACHE_LINE_SIZE, CORE_STAT_T_SIZE_ERROR);
 
-/** 
- * Array of core specific data accessed by a core using its core index.
- * No serialization mechanisms needed to protect the data even when using parallel queues.
+
+
+/**
+ * Event Group test shared data
  */
-ENV_SHARED  static  core_stat_t  core_stats[MAX_NBR_OF_CORES]  ENV_CACHE_LINE_ALIGNED;
+typedef struct
+{
+  /** EO context */
+  eo_context_t  event_group_test_eo_context  ENV_CACHE_LINE_ALIGNED;
+  
+  /** 
+   * Array of core specific data accessed by a core using its core index.
+   * No serialization mechanisms needed to protect the data even when using parallel queues.
+   */
+  core_stat_t  core_stats[MAX_NBR_OF_CORES]  ENV_CACHE_LINE_ALIGNED;
+  
+  /** Array containing dummy test data */
+  uint8_t  event_group_test_data[DATA_EVENTS * DATA_PER_EVENT]  ENV_CACHE_LINE_ALIGNED;  
+  
+} egrp_shm_t;
 
-COMPILE_TIME_ASSERT( sizeof(core_stat_t) == ENV_CACHE_LINE_SIZE,       CORE_STAT_T_SIZE_ERROR);
-COMPILE_TIME_ASSERT((sizeof(core_stats)  %  ENV_CACHE_LINE_SIZE) == 0, CORE_RCVD_EV_CNT_ARR_SIZE_ERROR);
-
-
-
-
-/** Array containing dummy test data */
-ENV_SHARED  static  uint8_t  event_group_test_data[DATA_EVENTS * DATA_PER_EVENT]  ENV_CACHE_LINE_ALIGNED;
+static ENV_LOCAL egrp_shm_t *egrp_shm = NULL;
 
 
 
@@ -221,10 +213,10 @@ delay_spin(const uint64_t spin_count);
 /**
  * Init and startup of the Event Group test application.
  *
- * @see main() and example_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(example_conf_t *const example_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t             eo;
   eo_context_t*       eo_ctx;
@@ -235,8 +227,21 @@ test_init(example_conf_t *const example_conf)
   em_status_t         eo_start_ret; // return value from the EO's start function 'group_start'
   
   
+  if(em_core_id() == 0) {
+    egrp_shm = env_shared_reserve("EGrpSharedMem", sizeof(egrp_shm_t));
+  }
+  else {
+    egrp_shm = env_shared_lookup("EGrpSharedMem");
+  }
+  
+
+  if(egrp_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), 0xdead, "EventGroup test init failed on EM-core: %u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
@@ -251,18 +256,18 @@ test_init(example_conf_t *const example_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         example_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         example_conf->num_procs,
-         example_conf->num_threads);
+         appl_conf->num_procs,
+         appl_conf->num_threads);
          
   
   /*
    * Create the event group test EO and a parallel queue, add the queue to the EO
    */
-  eo_ctx = &event_group_test_eo_context.eo_ctx;
+  eo_ctx = &egrp_shm->event_group_test_eo_context;
   
   eo    = em_eo_create("group test appl", egroup_start, NULL, egroup_stop, NULL, egroup_receive, eo_ctx);  
   queue = em_queue_create("group test parallelQ", EM_QUEUE_TYPE_PARALLEL, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
@@ -315,7 +320,7 @@ egroup_start(void* eo_context, em_eo_t eo)
     return EM_ERR_ALLOC_FAILED;
   }
   
-  (void) memset(core_stats, 0, sizeof(core_stats));
+  (void) memset(egrp_shm->core_stats, 0, sizeof(egrp_shm->core_stats));
   
   printf("EO:%"PRI_EO" - event group %"PRI_EGRP" created\n", eo, eo_ctx->event_group);
   
@@ -408,7 +413,7 @@ egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queu
           group_test_2 = em_event_pointer(data);
           
           group_test_2->msg          = MSG_DATA;
-          group_test_2->data_ptr     = &event_group_test_data[i*DATA_PER_EVENT];
+          group_test_2->data_ptr     = &egrp_shm->event_group_test_data[i*DATA_PER_EVENT];
           group_test_2->start_cycles = 0;
           group_test_2->increment    = EVENT_GROUP_INCREMENT; // how many times to increment and re-send
           
@@ -441,7 +446,7 @@ egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queu
         
         
         // update the count of data events received on this core
-        core_stats[em_core_id()].rcv_ev_cnt += 1;
+        egrp_shm->core_stats[em_core_id()].rcv_ev_cnt += 1;
         
         
         /*
@@ -503,7 +508,7 @@ egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queu
         
         // Sum up the amount of data events processed on each core 
         for(i = 0; i < em_core_count(); i++) {
-          rcv_ev_cnt += core_stats[i].rcv_ev_cnt;
+          rcv_ev_cnt += egrp_shm->core_stats[i].rcv_ev_cnt;
         }
         
         // The expected number of data events processed to trigger a notification event
@@ -523,7 +528,7 @@ egroup_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queu
         // Restart the test after "some cycles" of delay
         delay_spin(DELAY_SPIN_COUNT);
         
-        (void) memset(core_stats, 0, sizeof(core_stats));
+        (void) memset(egrp_shm->core_stats, 0, sizeof(egrp_shm->core_stats));
         
         egroup_test->msg = MSG_START;
       

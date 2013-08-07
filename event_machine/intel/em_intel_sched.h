@@ -82,6 +82,77 @@ COMPILE_TIME_ASSERT(EM_QUEUE_PRIO_LOWEST == 0, EM_QUEUE_PRIO_LOWEST__NOT_ZERO_ER
 
 
 
+/**
+ * Scheduling queue for atomic EM-queues
+ */
+typedef struct
+{
+  int               nbr_queues;
+
+  uint64_t          queue_mask;
+
+  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
+
+} sched_q_atomic_t;
+
+
+/**
+ * Scheduling queue for parallel EM-queues
+ */
+typedef struct
+{
+  int               nbr_queues;
+
+  uint64_t          queue_mask;
+
+  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
+
+} sched_q_parallel_t;
+
+
+/**
+ * Scheduling queue for parallel-ordered EM-queues
+ */
+typedef struct
+{
+  int               nbr_queues  ENV_CACHE_LINE_ALIGNED;
+
+  uint64_t          queue_mask;
+
+  struct multiring* sched_q[SCHED_Q_MAX_QUEUES];
+
+
+  union
+  {
+    env_spinlock_t  lock ENV_CACHE_LINE_ALIGNED;
+
+    uint8_t         u8[ENV_CACHE_LINE_SIZE];
+
+  } locks[SCHED_Q_MAX_QUEUES];
+
+
+} sched_q_parallel_ord_t ENV_CACHE_LINE_ALIGNED;
+
+COMPILE_TIME_ASSERT((sizeof(sched_q_parallel_ord_t) % ENV_CACHE_LINE_SIZE) == 0, SCHED_Q_PARALLEL_ORD_T_SIZE_ERROR);
+
+
+
+/**
+ * Scheduling queues per priority level
+ */
+typedef struct
+{
+  sched_q_atomic_t        sched_q_atomic[SCHED_QS]        ENV_CACHE_LINE_ALIGNED;
+
+  sched_q_parallel_t      sched_q_parallel[SCHED_QS]      ENV_CACHE_LINE_ALIGNED;
+
+  sched_q_parallel_ord_t  sched_q_parallel_ord[SCHED_QS]  ENV_CACHE_LINE_ALIGNED;
+
+} sched_qs_t  ENV_CACHE_LINE_ALIGNED;
+
+COMPILE_TIME_ASSERT((sizeof(sched_qs_t) % ENV_CACHE_LINE_SIZE) == 0, SCHED_QS_T_SIZE_ERROR);
+
+
 
 /**
  * Scheduling Queues Info on a core
@@ -147,7 +218,7 @@ typedef union
   
 } core_sched_masks_t  ENV_CACHE_LINE_ALIGNED;
 
-COMPILE_TIME_ASSERT((sizeof(core_sched_masks_t) % ENV_CACHE_LINE_SIZE) == 0,  CORE_QUEUE_GROUP_MASKS_T__SIZE_ERROR);
+COMPILE_TIME_ASSERT((sizeof(core_sched_masks_t) % ENV_CACHE_LINE_SIZE) == 0,  CORE_SCHED_MASKS_T__SIZE_ERROR);
 
 
 
@@ -180,6 +251,8 @@ typedef struct
   
 } core_sched_add_counts_t  ENV_CACHE_LINE_ALIGNED;
 
+COMPILE_TIME_ASSERT((sizeof(core_sched_add_counts_t) % ENV_CACHE_LINE_SIZE) == 0, CORE_SCHED_ADD_COUNTS_T__SIZE_ERROR);
+  
 
 
 /**

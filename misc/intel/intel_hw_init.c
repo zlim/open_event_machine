@@ -67,29 +67,13 @@
 
 
 
-
 void *                
-intel_pool_init(void)
+intel_pool_init(const char *name)
 {
-  struct rte_mempool *pktmbuf_pool_S0 = NULL;
+  struct rte_mempool *pktmbuf_pool = NULL;
   
-  /* create the memory pools for mbuf use, if NUMA use 2 sockets.  */
-  /* create cache rings for performance so cores can get/put mbufs */
-  /* without locks. Note that cores reading mbufs from a PCIe PMD  */
-  /* use the same cache ring on the core, depleting it quicker     */
-  /* The PMD for each interface allocates an equal number of mbufs */
-  /* in a ring for the nm of Rx descriptors on the port. As pkts   */
-  /* are received a new mbuf is allocated from the cache ring.     */
-  /*                                                               */
-  /* for load balance cores assume 2 ports with 128 Rx descriptors */
-  /* Therefore 256 mbufs for Rx descriptors turning over as new    */
-  /* packes arrive. Plus mbufs partition between worker cores in   */
-  /* local rings until we have enough to move to worker cores      */
-  /* n = 256 (RxD) +                                               */
-  /* 8K x 2K m_bufs                                                */
-  
-  pktmbuf_pool_S0 =
-    rte_mempool_create("mbuf_pool_0",
+  pktmbuf_pool =
+    rte_mempool_create(name,
                        NB_MBUF,
                        MBUF_SIZE,
                        MBUF_CACHE_SIZE,
@@ -101,28 +85,19 @@ intel_pool_init(void)
                        DEVICE_SOCKET,
                        0);
   
-  if(pktmbuf_pool_S0 == NULL) {
-    rte_panic("Cannot init mbuf pool on socket 0\n\n");
+  if(pktmbuf_pool == NULL) {
+    rte_panic("Cannot init mbuf pool on socket 0! rte_errno:%i(%s)\n\n", rte_errno, rte_strerror(rte_errno));
   }
 
-#if 0
-  if (numa_support) {
-    pktmbuf_pool_S1 =
-      rte_mempool_create("mbuf_pool_1", NB_MBUF,
-             MBUF_SIZE, 512,
-             sizeof(struct rte_pktmbuf_pool_private),
-             rte_pktmbuf_pool_init, NULL,
-             rte_pktmbuf_init, NULL,
-             SOCKET1, 0);
-    if (pktmbuf_pool_S1 == NULL)
-      rte_panic("Cannot init mbuf pool on socket 1\n\n");
-  }
-#endif
-
-  
-
-  return pktmbuf_pool_S0;
+  return pktmbuf_pool;
 }
 
 
 
+void *
+intel_pool_lookup(const char *name)
+{
+  struct rte_mempool *mempool = rte_mempool_lookup(name);
+  
+  return mempool;
+}

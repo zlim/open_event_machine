@@ -32,6 +32,9 @@
 #include "intel_hw_init.h"
 #include "em_error.h"
 
+#include "em_shared_data.h"
+#include "em_intel_inline.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -122,40 +125,6 @@ COMPILE_TIME_ASSERT( sizeof(struct rte_mbuf) == ENV_CACHE_LINE_SIZE,       MBUF_
 
 
 /**
- * Eth Rx queue -> port mapping
- */
-typedef struct
-{
-  uint8_t         port_id; 
-  
-  uint8_t         queue_id;
-
-} eth_rx_queue_info_t;
-
-
-/**
- * Array of available Rx port:queue pairs.
- * 
- * @note The FIFO 'eth_rx_queue_access' contains pointers to the available Rx port:queue pairs from this array.
- *       Core exclusive access to the shared Rx resources are enforced by en/dequeueing an Rx port:queue pair
- */
-ENV_SHARED  eth_rx_queue_info_t  eth_rx_queue_info[MAX_ETH_RX_QUEUES]  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(eth_rx_queue_info) % ENV_CACHE_LINE_SIZE) == 0, ETH_RX_QUEUE_INFO_ALIGNMENT_ERROR);
-
-
-/**
- * The Eth Rx port:queue access FIFO - a core dequeues a 'eth_rx_queue_info_t' and uses that port exclusively.
- * When the core is done with the port it will enqueue it again for some other core to use.
- */
-typedef union
-{
-  struct rte_ring *queue;
-    
-} eth_rx_queue_access_t;
-
-
-/**
  * Holds the currently dequeued eth_rx_queue_info_t and a counter that tracks the number of times
  * Rx-frames have been burst dequeued from the eth queue.
  */
@@ -188,25 +157,7 @@ COMPILE_TIME_ASSERT((sizeof(eth_tx_mbuf_tables_local) % ENV_CACHE_LINE_SIZE) == 
 
 
 /**
- * Tx buffer for Eth frames that must be sent out in-order.
- * One buffer per device (i.e. shared by all cores)
- */
-typedef struct
-{
-  env_spinlock_t   lock    ENV_CACHE_LINE_ALIGNED;
-  
-  struct rte_ring *m_burst ENV_CACHE_LINE_ALIGNED;
-  
-} eth_tx_mbuf_table_t ENV_CACHE_LINE_ALIGNED;
-
-ENV_SHARED  eth_tx_mbuf_table_t  eth_tx_mbuf_tables[MAX_ETH_PORTS][MAX_ETH_TX_MBUF_TABLES];
-
-COMPILE_TIME_ASSERT((sizeof(eth_tx_mbuf_tables) % ENV_CACHE_LINE_SIZE) == 0, ETH_TX_MBUF_TABLES_SIZE_ERROR);
-
-
-
-/**
- * Temp buffer used with ordered Tx frames: dequeue from eth_tx_mbuf_tables[x][y] into tx_burst_m_table,
+ * Temp buffer used with ordered Tx frames: dequeue from em.shm->eth_tx_mbuf_tables[x][y] into tx_burst_m_table,
  * then burst transmit from the tx_burst_m_table to Eth Tx.
  */
 ENV_LOCAL struct rte_mbuf* tx_burst_m_table[MAX_TX_PKT_BURST]  ENV_CACHE_LINE_ALIGNED;
@@ -249,14 +200,14 @@ COMPILE_TIME_ASSERT((sizeof(eth_tx_drain_queues__local) % ENV_CACHE_LINE_SIZE) =
 
 
 /* Ethernet addresses of ports - used in init */
-ENV_SHARED static  struct ether_addr  port_eth_addr[MAX_ETH_PORTS];
+static  struct ether_addr  port_eth_addr[MAX_ETH_PORTS];
 
 
 
 /**
  * Eth port configuration
  */
-ENV_SHARED static const  struct rte_eth_conf  eth_port_conf = {
+static const  struct rte_eth_conf  eth_port_conf = {
   .rxmode = {
     .max_rx_pkt_len = ETHER_MAX_LEN,
     .mq_mode        = ETH_RSS, /* Receive Side Scaling, on Niantic up to 16 Rx eth-queues */
@@ -269,6 +220,7 @@ ENV_SHARED static const  struct rte_eth_conf  eth_port_conf = {
   },
   
   .txmode = {
+    .mq_mode = ETH_DCB_NONE,
   },
   
   .rx_adv_conf.rss_conf = {
@@ -282,13 +234,14 @@ ENV_SHARED static const  struct rte_eth_conf  eth_port_conf = {
 /**
  * Eth Rx configuration
  */
-ENV_SHARED static const  struct rte_eth_rxconf  eth_rx_conf = {
+static const  struct rte_eth_rxconf  eth_rx_conf = {
   .rx_thresh = {
     .pthresh = RX_PTHRESH,
     .hthresh = RX_HTHRESH,
     .wthresh = RX_WTHRESH,
   },
-  //.rx_free_thresh = 32, suggested value, but when set gives worse perf.
+  //.rx_free_thresh = 32, suggested value in DPDK 1.3.0 RelNotes, but when set gives worse perf.
+  //.rx_drop_en     = 0
 };
 
 
@@ -296,7 +249,7 @@ ENV_SHARED static const  struct rte_eth_rxconf  eth_rx_conf = {
 /**
  * Eth Tx configuration
  */
-ENV_SHARED static const  struct rte_eth_txconf  eth_tx_conf = {
+static const  struct rte_eth_txconf  eth_tx_conf = {
   .tx_thresh = {
     .pthresh = TX_PTHRESH,
     .hthresh = TX_HTHRESH,
@@ -304,6 +257,7 @@ ENV_SHARED static const  struct rte_eth_txconf  eth_tx_conf = {
   },
   .tx_free_thresh = 0, /* Use PMD default values */
   .tx_rs_thresh   = 0, /* Use PMD default values */
+  .txq_flags      = 0x0
 };
 
 
@@ -311,9 +265,7 @@ ENV_SHARED static const  struct rte_eth_txconf  eth_tx_conf = {
 /**
  * Packet I/O hash params
  */
-#define PACKET_Q_HASH_ENTRIES 4096
-
-ENV_SHARED struct rte_hash_parameters
+struct rte_hash_parameters
 packet_q_hash_params =
 {
   .name = "packet_q_hash",
@@ -328,22 +280,6 @@ packet_q_hash_params =
 };
 
 
-
-
-/**
- * Packet I/O flows lookup hash
- */
-ENV_SHARED  packet_q_hash_t  packet_q_hash  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(packet_q_hash) % ENV_CACHE_LINE_SIZE) == 0, PACKET_Q_HASH_SIZE_ERROR);
-
-
-/**
- * Mapping from hash val to actual EM-queue
- * EM-queue = packet_queues[packet_q_hash-result]
- */
-ENV_SHARED  em_queue_t  packet_queues[PACKET_Q_HASH_ENTRIES]  ENV_CACHE_LINE_ALIGNED;
-COMPILE_TIME_ASSERT((sizeof(packet_queues) % ENV_CACHE_LINE_SIZE) == 0, PACKET_QUEUES_SIZE_ERROR);
 
 /** Hash lookup output containing a list of values, corresponding to the list of keys */
 ENV_LOCAL  int32_t  positions[MAX_RX_PKT_BURST] ENV_CACHE_LINE_ALIGNED;
@@ -402,35 +338,8 @@ COMPILE_TIME_ASSERT((sizeof(em_pkt_local_t) % ENV_CACHE_LINE_SIZE) == 0, EM_PKT_
 
 
 /*
- * Grouping of shared variables that are almost always read-only
- */
-typedef union
-{
-  struct
-  {
-    eth_ports_link_up_t    eth_ports_link_up;
-    
-    eth_rx_queue_access_t  eth_rx_queue_access;
-    
-    em_queue_t             em_default_queue;    
-  };
-    
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
-  
-} em_pkt_shared_readmostly_t;
-
-ENV_SHARED   em_pkt_shared_readmostly_t  shared  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(em_pkt_shared_readmostly_t) % ENV_CACHE_LINE_SIZE) == 0, EM_PKT_SHARED_T_SIZE_ERROR);
-
-
-
-
-
-/*
  * LOCAL FUNCTION PROTOTYPES
  */
- 
 static inline void
 em_packet_lookup_enqueue(struct rte_mbuf *const mbufs[], const int n_mbuf, const int input_port);
 
@@ -464,7 +373,7 @@ eth_tx_packets_timed__no_order(void);
 void 
 intel_eth_init(void)
 {
-  unsigned int  nb_ports;
+  int           nb_ports;
   unsigned int  nb_lcores;  
   unsigned int  portid;
   unsigned int  queueid;
@@ -480,19 +389,19 @@ intel_eth_init(void)
   struct rte_mempool      *eth_mempool;  
   
   
-  shared.em_default_queue = EM_QUEUE_UNDEF;
+  em.shm->rdmostly.em_default_queue = EM_QUEUE_UNDEF;
   
-  memset(&shared.eth_ports_link_up, 0, sizeof(shared.eth_ports_link_up));
+  memset(&em.shm->rdmostly.eth_ports_link_up, 0, sizeof(em.shm->rdmostly.eth_ports_link_up));
   
   
-  memset(&eth_rx_queue_info[0], 0, sizeof(eth_rx_queue_info));
-  memset(&shared.eth_rx_queue_access, 0, sizeof(shared.eth_rx_queue_access));
+  memset(&em.shm->eth_rx_queue_info[0], 0, sizeof(em.shm->eth_rx_queue_info));
+  memset(&em.shm->rdmostly.eth_rx_queue_access, 0, sizeof(em.shm->rdmostly.eth_rx_queue_access));
   
   /* Eth Rx queue aceess control - queue is multi-consumer and multi-producer */
-  shared.eth_rx_queue_access.queue = rte_ring_create("EthRxPortAccess", MAX_ETH_RX_QUEUES, DEVICE_SOCKET, 0);
+  em.shm->rdmostly.eth_rx_queue_access.queue = rte_ring_create("EthRxPortAccess", MAX_ETH_RX_QUEUES, DEVICE_SOCKET, 0);
   
   
-  memset(eth_tx_mbuf_tables, 0, sizeof(eth_tx_mbuf_tables));
+  memset(em.shm->eth_tx_mbuf_tables, 0, sizeof(em.shm->eth_tx_mbuf_tables));
   
   for(j = 0; j < MAX_ETH_PORTS; j++)
   {
@@ -501,56 +410,31 @@ intel_eth_init(void)
     
     for(i = 0; i < MAX_ETH_TX_MBUF_TABLES; i++)
     {
-      env_spinlock_init(&eth_tx_mbuf_tables[j][i].lock);
+      env_spinlock_init(&em.shm->eth_tx_mbuf_tables[j][i].lock);
       
       (void) snprintf(name, sizeof(name)-1, "%s-%i-%i", def_name, j, i);
       name[sizeof(name)-1] = '\0';
       /* NOTE: RING_F_SC_DEQ-flag used => rte_ring_sc_dequeue_bulk() explicitly used! Don't change flag! */
-      eth_tx_mbuf_tables[j][i].m_burst = rte_ring_create(name, 128 * MAX_TX_PKT_BURST, DEVICE_SOCKET, RING_F_SC_DEQ);
+      em.shm->eth_tx_mbuf_tables[j][i].m_burst = rte_ring_create(name, 128 * MAX_TX_PKT_BURST, DEVICE_SOCKET, RING_F_SC_DEQ);
     }
   }
   
   
   
   /* 
-   * Init eth driver(s) 
+   * Init eth poll-mode driver(s) 
    */
-  
-#ifdef RTE_LIBRTE_IGB_PMD
-  /* 1GE Kawela */
-  ret = rte_igb_pmd_init();
-  
-  ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
-           "Cannot init 1GE (82576) pmd, ret=%i", ret);
-#endif
-
-
-#ifdef RTE_LIBRTE_IXGBE_PMD
-  /* 10GE Niantic */
-  ret = rte_ixgbe_pmd_init();
-  
-  ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
-           "Cannot init 10GE (82599) pmd, ret=%i", ret);
-#endif
-
-
-  ret = rte_eal_pci_probe();
-  
-  ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
-           "Cannot probe PCI, ret=%i", ret);
-
-
-  /* Get the number of ethernet ports */
+  // nb_ports = init_eth_pmd_drivers(); // this has been run earlier in setup (before fork in EM proc-per-core mode)
   nb_ports = rte_eth_dev_count();
   
-  ERROR_IF(nb_ports == 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
-           "No Ethernet port - bye!");
-  
+  ERROR_IF(nb_ports <= 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
+           "Cannot init Eth pmd, retval nb_ports=%i", nb_ports);
+
   
   /* Get number of running cores */
-  nb_lcores = rte_lcore_count();
+  nb_lcores = em_core_count();
   
-  printf("%s(): Eth ports:%u Cores:%u \n",__func__, nb_ports, nb_lcores);
+  printf("%s(): Eth ports:%i Cores:%u \n",__func__, nb_ports, nb_lcores);
     
 
 
@@ -599,7 +483,7 @@ intel_eth_init(void)
   
   
   /* Allocate the packet buffers from the EM event pool - events and frames/packets can be interchanged */
-  eth_mempool = (struct rte_mempool *) em_event_pool.pool;
+  eth_mempool = (struct rte_mempool *) em.event_pool;
   
   ERROR_IF(eth_mempool == NULL, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_INIT,
            "eth_mempool==NULL!");
@@ -661,15 +545,15 @@ intel_eth_init(void)
     
     if(link.link_status)
     {
-      int idx = shared.eth_ports_link_up.n_link_up;
+      int idx = em.shm->rdmostly.eth_ports_link_up.n_link_up;
       
-      shared.eth_ports_link_up.port[idx].portid     = portid;
-      shared.eth_ports_link_up.port[idx].n_rx_queue = n_rx_queue;
-      shared.eth_ports_link_up.port[idx].n_tx_queue = n_tx_queue;
+      em.shm->rdmostly.eth_ports_link_up.port[idx].portid     = portid;
+      em.shm->rdmostly.eth_ports_link_up.port[idx].n_rx_queue = n_rx_queue;
+      em.shm->rdmostly.eth_ports_link_up.port[idx].n_tx_queue = n_tx_queue;
       
-      shared.eth_ports_link_up.n_link_up++;
-      shared.eth_ports_link_up.n_rx_queues += n_rx_queue;
-      shared.eth_ports_link_up.n_tx_queues += n_tx_queue;
+      em.shm->rdmostly.eth_ports_link_up.n_link_up++;
+      em.shm->rdmostly.eth_ports_link_up.n_rx_queues += n_rx_queue;
+      em.shm->rdmostly.eth_ports_link_up.n_tx_queues += n_tx_queue;
       
       printf(" Link Up - speed %u Mbps - %s\n",
              (uint32_t) link.link_speed,
@@ -686,24 +570,24 @@ intel_eth_init(void)
   
   
   
-  for(i = 0, j = 0; i < shared.eth_ports_link_up.n_link_up; i++)
+  for(i = 0, j = 0; i < em.shm->rdmostly.eth_ports_link_up.n_link_up; i++)
   {
     int k;
     
-    assert(shared.eth_ports_link_up.port[i].n_rx_queue <= UINT8_MAX);
+    assert(em.shm->rdmostly.eth_ports_link_up.port[i].n_rx_queue <= UINT8_MAX);
     
-    for(k = 0; k < shared.eth_ports_link_up.port[i].n_rx_queue; k++, j++)
+    for(k = 0; k < em.shm->rdmostly.eth_ports_link_up.port[i].n_rx_queue; k++, j++)
     {
-      assert(shared.eth_ports_link_up.port[i].portid <= UINT8_MAX);
+      assert(em.shm->rdmostly.eth_ports_link_up.port[i].portid <= UINT8_MAX);
       
-      eth_rx_queue_info[j].port_id  = (uint8_t) shared.eth_ports_link_up.port[i].portid;
-      eth_rx_queue_info[j].queue_id = (uint8_t) k;
+      em.shm->eth_rx_queue_info[j].port_id  = (uint8_t) em.shm->rdmostly.eth_ports_link_up.port[i].portid;
+      em.shm->eth_rx_queue_info[j].queue_id = (uint8_t) k;
       
-      ret = rte_ring_enqueue(shared.eth_rx_queue_access.queue, &eth_rx_queue_info[j]);
+      ret = rte_ring_enqueue(em.shm->rdmostly.eth_rx_queue_access.queue, &em.shm->eth_rx_queue_info[j]);
       assert(ret == 0);
     }
   }
-  assert(j == shared.eth_ports_link_up.n_rx_queues);
+  assert(j == em.shm->rdmostly.eth_ports_link_up.n_rx_queues);
 
 
 
@@ -716,7 +600,7 @@ intel_eth_init(void)
 
 
 /**
- * Local packet I/O init (run on each core once at strtup)
+ * Local packet I/O init (run on each EM-core once at startup)
  */
 void
 intel_eth_init_local(void)
@@ -734,14 +618,11 @@ intel_eth_init_local(void)
   local.curr_rx_queue_info.current_info = NULL;
   
   
-  
   memset(eth_tx_mbuf_tables_local, 0, sizeof(eth_tx_mbuf_tables_local));
   
   // Set Eth Tx queue id for this local core for parallel em-queues
   local.eth_tx_local_queue_id = MAX_ETH_TX_MBUF_TABLES + core_id;                              
-  printf("\nEM-core%u: Eth Tx Queue Id (LOCAL):%u\n", core_id, local.eth_tx_local_queue_id);
-  
-  
+  //printf("\nEM-core%u: Eth Tx Queue Id (LOCAL):%u\n", core_id, local.eth_tx_local_queue_id);
   
   
   /*
@@ -750,7 +631,7 @@ intel_eth_init_local(void)
    * Each core gets a subset of the tx queues to drain - assigned at startup.
    * Each core drains the same set of queues per eth-Tx-port.
    */
-  printf("EM-core%u: Eth-Tx-Drain-Queues ", core_id);
+  //printf("EM-core%u: Eth-Tx-Drain-Queues ", core_id);
   memset(&eth_tx_drain_queues__local, 0, sizeof(eth_tx_drain_queues__local));
   
   eth_tx_drain_queues__local.curr_idx = 0;
@@ -765,14 +646,50 @@ intel_eth_init_local(void)
     if(tx_q_idx < MAX_ETH_TX_MBUF_TABLES)
     {
       eth_tx_drain_queues__local.id[j] = tx_q_idx;
-      printf("[%u]=%u ", j, tx_q_idx);
+      //printf("[%u]=%u ", j, tx_q_idx);
       j++;
     }
   }
   
   eth_tx_drain_queues__local.len = j;
-  printf("len:%i\n", j); fflush(NULL);
+  //printf("len:%i\n", j); fflush(NULL);
   
+}
+
+
+
+/**
+ * Initialize the Eth Poll-mode drivers (should be called once per process)
+ */
+int 
+init_eth_pmd_drivers(void)
+{
+  int ret;
+  int nb_ports;
+  
+  
+  ret = rte_pmd_init_all();
+  ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_PMD_INIT,
+           "Cannot init Eth pmd on EM-core%02i, ret=%i", em_core_id(), ret) {
+    return -1;
+  }
+
+  ret = rte_eal_pci_probe();
+  ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_PMD_INIT,
+           "Cannot probe PCI on EM-core%02i, ret=%i", em_core_id(), ret) {
+    return -2;
+  }
+
+  /* Get the number of ethernet ports */
+  nb_ports = rte_eth_dev_count();
+  ERROR_IF(nb_ports == 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_INTEL_ETH_PMD_INIT,
+           "No Ethernet port found on EM-core%02i - bye!", em_core_id()) {
+    return -3;
+  }
+  
+  //printf("%s(): nb_ports=%i\n", __func__, nb_ports);
+  
+  return nb_ports;
 }
 
 
@@ -785,18 +702,18 @@ intel_init_packet_q_hash_global(void)
 {
   int i; 
   
-  env_spinlock_init(&packet_q_hash.lock);
+  env_spinlock_init(&em.shm->packet_q_hash.lock);
   
   /* create the hash */
-  packet_q_hash.hash = rte_hash_create(&packet_q_hash_params);
+  em.shm->packet_q_hash.hash = rte_hash_create(&packet_q_hash_params);
   
-  ERROR_IF(packet_q_hash.hash == NULL, EM_FATAL(EM_ERR_LIB_FAILED),
+  ERROR_IF(em.shm->packet_q_hash.hash == NULL, EM_FATAL(EM_ERR_LIB_FAILED),
            EM_ESCOPE_PACKETIO_INIT_PACKET_Q_HASH,
            "Unable to create the packet_q hash\n");
   
   
   for(i = 0; i < PACKET_Q_HASH_ENTRIES; i++) {
-    packet_queues[i] = EM_QUEUE_UNDEF;
+    em.shm->packet_queues[i] = EM_QUEUE_UNDEF;
   }
 }
 
@@ -843,7 +760,7 @@ em_eth_tx_packet(em_event_t event, const int port)
   
   if(src_queue_type == EM_QUEUE_TYPE_ATOMIC)
   {
-    PREFETCH_RTE_RING(eth_tx_mbuf_tables[port][tx_queueid].m_burst);
+    PREFETCH_RTE_RING(em.shm->eth_tx_mbuf_tables[port][tx_queueid].m_burst);
     
     eth_tx_packet__ordered(m, port, tx_queueid);
   }
@@ -883,10 +800,12 @@ em_eth_tx_packet(em_event_t event, const int port)
 /**
  * Send the packet on an output interface, maintains packet order
  */
+#if 1 
+// version uses rte_ring_sc_dequeue_bulk() (cmp to rte_ring_sc_dequeue_burst())
 void 
 eth_tx_packet__ordered(void *mbuf, int port, uint16_t tx_queueid)
 {
-  eth_tx_mbuf_table_t *const tx_mbuf_table = &eth_tx_mbuf_tables[port][tx_queueid];
+  eth_tx_mbuf_table_t *const tx_mbuf_table = &em.shm->eth_tx_mbuf_tables[port][tx_queueid];
   env_spinlock_t      *const lock          = &tx_mbuf_table->lock;
   const unsigned             len           = rte_ring_count(tx_mbuf_table->m_burst);
   int                        ret           = -1;
@@ -924,7 +843,51 @@ eth_tx_packet__ordered(void *mbuf, int port, uint16_t tx_queueid)
   }
   
 }
-
+#else 
+// version uses rte_ring_sc_dequeue_burst() (cmp to rte_ring_sc_dequeue_bulk())
+void 
+eth_tx_packet__ordered(void *mbuf, int port, uint16_t tx_queueid)
+{
+  eth_tx_mbuf_table_t *const tx_mbuf_table = &em.shm->eth_tx_mbuf_tables[port][tx_queueid];
+  env_spinlock_t      *const lock          = &tx_mbuf_table->lock;
+  const unsigned             len           = rte_ring_count(tx_mbuf_table->m_burst);
+  int                        n             = 0;
+  int                        ret;
+  
+  
+  IF_UNLIKELY((len >= (MAX_TX_PKT_BURST-1)) && (!env_spinlock_is_locked(lock)))
+  {
+    IF_LIKELY(env_spinlock_trylock(lock))
+    {
+      n = rte_ring_sc_dequeue_burst(tx_mbuf_table->m_burst, (void **) tx_burst_m_table, MAX_TX_PKT_BURST-1);
+      
+      IF_LIKELY(n > 0)
+      { 
+        // Dequeue success!
+        tx_burst_m_table[n] = mbuf;
+        eth_tx_packet_burst(n+1, port, tx_queueid,  tx_burst_m_table);
+      }
+      
+      env_spinlock_unlock(lock);
+    }
+  }
+  
+  
+  if(n <= 0)
+  {
+    // Default operation - enqueue new buffer
+    ret = rte_ring_enqueue(tx_mbuf_table->m_burst, mbuf);
+    
+    IF_UNLIKELY(ret == (-ENOBUFS))
+    {
+      rte_pktmbuf_free(mbuf);
+      //(void) EM_INTERNAL_ERROR(EM_ERR_LIB_FAILED, EM_ESCOPE_PACKETIO_ETH_TX_PACKET_ORDERED,
+      //                         "Enqueue failed (%i) - drop frame!", ret);    
+    }
+  }
+  
+}
+#endif
 
 
 
@@ -1027,6 +990,8 @@ em_eth_tx_packets_timed(void)
 /**
  * Drain packet queues containing packets from ordered EM-queues
  */
+#if 0  
+// version uses rte_ring_sc_dequeue_bulk() (cmp to rte_ring_sc_dequeue_burst())
 static inline void
 eth_tx_packets_timed__ordered(void)
 {
@@ -1042,10 +1007,10 @@ eth_tx_packets_timed__ordered(void)
   tx_queue_id = eth_tx_drain_queues__local.id[idx];
 
   
-  for(i = 0; i < shared.eth_ports_link_up.n_link_up; i++)
+  for(i = 0; i < em.shm->rdmostly.eth_ports_link_up.n_link_up; i++)
   {
-    portid        = shared.eth_ports_link_up.port[i].portid;
-    tx_mbuf_table = &eth_tx_mbuf_tables[portid][tx_queue_id];
+    portid        = em.shm->rdmostly.eth_ports_link_up.port[i].portid;
+    tx_mbuf_table = &em.shm->eth_tx_mbuf_tables[portid][tx_queue_id];
     
     
     if(rte_ring_empty(tx_mbuf_table->m_burst)) {
@@ -1073,7 +1038,51 @@ eth_tx_packets_timed__ordered(void)
   /* Update Tx-Queue index for next round */
   eth_tx_drain_queues__local.curr_idx = (idx + 1) < eth_tx_drain_queues__local.len ? (idx + 1) : 0;
 }
+#else 
+// version uses rte_ring_sc_dequeue_burst() (cmp to rte_ring_sc_dequeue_bulk())
+static inline void
+eth_tx_packets_timed__ordered(void)
+{
+  unsigned int         portid;
+  unsigned int         tx_queue_id;
+  unsigned int         idx;
+  eth_tx_mbuf_table_t *tx_mbuf_table;
+  int                  i;
+  int                  n = 0;
+  
+  
+  idx         = eth_tx_drain_queues__local.curr_idx;
+  tx_queue_id = eth_tx_drain_queues__local.id[idx];
 
+  
+  for(i = 0; i < em.shm->rdmostly.eth_ports_link_up.n_link_up; i++)
+  {
+    portid        = em.shm->rdmostly.eth_ports_link_up.port[i].portid;
+    tx_mbuf_table = &em.shm->eth_tx_mbuf_tables[portid][tx_queue_id];
+    
+    
+    if(rte_ring_empty(tx_mbuf_table->m_burst)) {
+      continue;
+    }
+    
+
+    IF_LIKELY(env_spinlock_trylock(&tx_mbuf_table->lock))
+    { 
+      n = rte_ring_sc_dequeue_burst(tx_mbuf_table->m_burst, (void ** ) tx_burst_m_table, MAX_TX_PKT_BURST);
+      
+      IF_LIKELY(n > 0) {
+        eth_tx_packet_burst(n, portid, tx_queue_id, tx_burst_m_table);
+      }
+      
+      env_spinlock_unlock(&tx_mbuf_table->lock);
+    }
+  }
+  
+  
+  /* Update Tx-Queue index for next round */
+  eth_tx_drain_queues__local.curr_idx = (idx + 1) < eth_tx_drain_queues__local.len ? (idx + 1) : 0;
+}
+#endif
 
 
 
@@ -1089,9 +1098,9 @@ eth_tx_packets_timed__no_order(void)
   int                        i;
   
   
-  for(i = 0; i < shared.eth_ports_link_up.n_link_up; i++)
+  for(i = 0; i < em.shm->rdmostly.eth_ports_link_up.n_link_up; i++)
   { 
-    portid        = shared.eth_ports_link_up.port[i].portid;
+    portid        = em.shm->rdmostly.eth_ports_link_up.port[i].portid;
     tx_mbuf_table = &eth_tx_mbuf_tables_local[portid];
     
     IF_LIKELY(tx_mbuf_table->len > 0)
@@ -1123,7 +1132,7 @@ em_eth_rx_packets(void)
   
   IF_UNLIKELY(local.curr_rx_queue_info.access_cnt == 0)
   {
-    ret = rte_ring_dequeue(shared.eth_rx_queue_access.queue, (void **) &local.curr_rx_queue_info.current_info);
+    ret = rte_ring_dequeue(em.shm->rdmostly.eth_rx_queue_access.queue, (void **) &local.curr_rx_queue_info.current_info);
     owns_rx_queue = !ret;
   }
     
@@ -1151,7 +1160,7 @@ em_eth_rx_packets(void)
     IF_UNLIKELY((local.curr_rx_queue_info.access_cnt == ETH_RX_IDX_CNT_MAX) || (nb_rx == 0))
     {
       // Unlock ONLY when count==ETH_RX_IDX_CNT_MAX or no frames was received here
-      ret = rte_ring_enqueue(shared.eth_rx_queue_access.queue, local.curr_rx_queue_info.current_info);
+      ret = rte_ring_enqueue(em.shm->rdmostly.eth_rx_queue_access.queue, local.curr_rx_queue_info.current_info);
       
       // Advance to the next Rx-queue for the next iteration if little data was seen here or we have received 'enough'
       local.curr_rx_queue_info.access_cnt = 0;
@@ -1186,8 +1195,8 @@ em_packet_lookup_enqueue(struct rte_mbuf *const mbufs[], const int n_mbuf, const
   struct udp_hdr      *udp;
 
 
-  ENV_PREFETCH(packet_q_hash.hash);
-  ENV_PREFETCH_NEXT_LINE(packet_q_hash.hash);
+  ENV_PREFETCH(em.shm->packet_q_hash.hash);
+  ENV_PREFETCH_NEXT_LINE(em.shm->packet_q_hash.hash);
 
   /*
    * Fill in the hash lookup keys from the received packets
@@ -1231,7 +1240,7 @@ em_packet_lookup_enqueue(struct rte_mbuf *const mbufs[], const int n_mbuf, const
      * Hash lookup for multiple keys at once.
      * NOTE: key_ptrs[] = {&key[0], &key[1], ... , &key[N-1]} set once per core at initialization
      */
-    ret = rte_hash_lookup_multi(packet_q_hash.hash, (const void **) &key_ptrs[i], bufs, &positions[i]);
+    ret = rte_hash_lookup_multi(em.shm->packet_q_hash.hash, (const void **) &key_ptrs[i], bufs, &positions[i]);
     
     /* Free all packets/frames if the whole lookup was a failure (should not happen!!!) */
     IF_UNLIKELY(ret < 0)
@@ -1261,14 +1270,14 @@ em_packet_lookup_enqueue(struct rte_mbuf *const mbufs[], const int n_mbuf, const
     
     
     IF_LIKELY(pos >= 0) {
-      queue = packet_queues[pos];
+      queue = em.shm->packet_queues[pos];
     }
     else {
       // Not found!
-      IF_LIKELY(shared.em_default_queue != EM_QUEUE_UNDEF)
+      IF_LIKELY(em.shm->rdmostly.em_default_queue != EM_QUEUE_UNDEF)
       {
         // Default queue set - use this.
-        queue = shared.em_default_queue;
+        queue = em.shm->rdmostly.em_default_queue;
       }
       else {
         rte_pktmbuf_free(m);
@@ -1276,7 +1285,7 @@ em_packet_lookup_enqueue(struct rte_mbuf *const mbufs[], const int n_mbuf, const
       }      
     }
     
-    q_elem = &em_queue_element_tbl[queue];
+    q_elem = &em.shm->em_queue_element_tbl[queue];
     
     rx_lookup_pairs[n_mbuf_valid].q_elem = q_elem;
     rx_lookup_pairs[n_mbuf_valid].ev_hdr = ev_hdr;
@@ -1378,7 +1387,7 @@ packet_enqueue(em_event_hdr_t *const ev_hdr, em_queue_element_t *const q_elem, c
 int
 em_packet_default_queue(em_queue_t queue)
 {
-  shared.em_default_queue = queue;
+  em.shm->rdmostly.em_default_queue = queue;
 
   env_sync_mem();
 
@@ -1413,15 +1422,15 @@ em_packet_add_io_queue(uint8_t proto, uint32_t ipv4_dst, uint16_t port_dst, em_q
   key.proto    = proto;
   
   
-  env_spinlock_lock(&packet_q_hash.lock);
+  env_spinlock_lock(&em.shm->packet_q_hash.lock);
   
-  ret = rte_hash_add_key(packet_q_hash.hash, (void *) &key);
+  ret = rte_hash_add_key(em.shm->packet_q_hash.hash, (void *) &key);
   
   ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_ADD_IO_QUEUE,
            "Unable to add entry to the packet_q_hash (ret=%i)", ret);
            
   
-  packet_queues[ret] = queue;
+  em.shm->packet_queues[ret] = queue;
   
   
   q_elem->pkt_io_proto    = proto;
@@ -1431,7 +1440,7 @@ em_packet_add_io_queue(uint8_t proto, uint32_t ipv4_dst, uint16_t port_dst, em_q
   q_elem->pkt_io_enabled = 1;
   
   
-  env_spinlock_unlock(&packet_q_hash.lock);
+  env_spinlock_unlock(&em.shm->packet_q_hash.lock);
   
   env_sync_mem();
   
@@ -1466,31 +1475,31 @@ em_packet_rem_io_queue(uint8_t proto, uint32_t ipv4_dst, uint16_t port_dst, em_q
   key.proto    = proto;
   
   
-  env_spinlock_lock(&packet_q_hash.lock);
+  env_spinlock_lock(&em.shm->packet_q_hash.lock);
   
-  ret = rte_hash_del_key(packet_q_hash.hash, (void *) &key);
+  ret = rte_hash_del_key(em.shm->packet_q_hash.hash, (void *) &key);
 
 
   ERROR_IF(ret < 0, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_ADD_IO_QUEUE,
            "Unable to remove entry from the packet_q_hash (ret=%i)", ret);
            
-  ERROR_IF(packet_queues[ret] != queue, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_ADD_IO_QUEUE,
+  ERROR_IF(em.shm->packet_queues[ret] != queue, EM_FATAL(EM_ERR_LIB_FAILED), EM_ESCOPE_PACKETIO_ADD_IO_QUEUE,
            "Queue given as arg(%"PRI_QUEUE") does not match the stored lookup-queue(%"PRI_QUEUE")! packet_q_hash ret=%i\n",
-           queue, packet_queues[ret], ret);
+           queue, em.shm->packet_queues[ret], ret);
                       
   
-  packet_queues[ret] = EM_QUEUE_UNDEF;
+  em.shm->packet_queues[ret] = EM_QUEUE_UNDEF;
 
   q_elem->pkt_io_enabled  = 0;
   q_elem->pkt_io_proto    = 0;
   q_elem->pkt_io_ipv4_dst = 0;
   q_elem->pkt_io_port_dst = 0;  
   
-  env_spinlock_unlock(&packet_q_hash.lock);
+  env_spinlock_unlock(&em.shm->packet_q_hash.lock);
   
   env_sync_mem();
   
-  // printf("%s()-queue=%"PRI_QUEUE" ret=%i packet_queues[ret]=%"PRI_QUEUE"\n", __func__, queue, ret, packet_queues[ret]);
+  // printf("%s()-queue=%"PRI_QUEUE" ret=%i packet_queues[ret]=%"PRI_QUEUE"\n", __func__, queue, ret, em.shm->packet_queues[ret]);
 }
 
 
@@ -1512,9 +1521,9 @@ em_packet_queue_lookup_sw(uint8_t proto, uint32_t ipv4_dst, uint16_t port_dst)
   key.port_dst = rte_cpu_to_be_16(port_dst);
   key.proto    = proto;
   
-  ret = rte_hash_lookup(packet_q_hash.hash, (const void *)&key);
+  ret = rte_hash_lookup(em.shm->packet_q_hash.hash, (const void *)&key);
   
-  queue = (ret < 0) ? EM_QUEUE_UNDEF : packet_queues[ret];
+  queue = (ret < 0) ? EM_QUEUE_UNDEF : em.shm->packet_queues[ret];
     
   return queue;
 }

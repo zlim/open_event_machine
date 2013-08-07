@@ -43,38 +43,12 @@
 #include "em_error.h"
 #include "em_intel.h"
 
+#include "em_shared_data.h"
+
+#include "em_intel_inline.h"
+
 #include <rte_debug.h>
 #include <rte_atomic.h>
-
-/**
- * EM Error Handler
- */
- 
-typedef union
-{
-  struct 
-  {
-    // Global Error Handler (func ptr or NULL)
-    em_error_handler_t  em_error_handler  ENV_CACHE_LINE_ALIGNED;
-    
-    // Global Error Count
-    rte_atomic64_t      global_error_count;
-    
-    // Spinlock
-    env_spinlock_t      lock;
-  };
-  
-  // Guarantees that size is 1*cache-line-size
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
-
-} em_error_handler_aligned_t;
-
-
-COMPILE_TIME_ASSERT(sizeof(em_error_handler_aligned_t) == ENV_CACHE_LINE_SIZE, EM_ERROR_HANDER_ALIGNED_T_SIZE_ERROR);
-
-
-ENV_SHARED  em_error_handler_aligned_t  em_error_handler_aligned  ENV_CACHE_LINE_ALIGNED 
-  = {{.em_error_handler = NULL /* changed in init */}};
 
 
 
@@ -86,12 +60,18 @@ COMPILE_TIME_ASSERT(EM_ESCOPE(EM_ESCOPE_API_MASK)     , EM_ESCOPE_API_IS_NOT_PAR
 COMPILE_TIME_ASSERT(EM_ESCOPE(EM_ESCOPE_INTERNAL_MASK), EM_ESCOPE_INTERNAL_IS_NOT_PART_OF_EM_ESCOPE__ERROR);
 
 
+static int error_handler_initialized = 0;
+
+
 /*
  * Local function prototypes
  */
  
 static em_status_t
 em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_list args);
+
+static em_status_t
+em_early_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_list args);
 
 static em_status_t
 select_error_handler(em_status_t error, em_escope_t escope, va_list args_list);
@@ -104,7 +84,7 @@ select_error_handler(em_status_t error, em_escope_t escope, va_list args_list);
  *
  * The EO specific error handler is called if error is noticed or em_error() is 
  * called in the context of the EO. Note, the function will override any previously 
- * registered error hanler.
+ * registered error handler.
  *
  * @param eo            EO id
  * @param handler       New error handler.
@@ -123,9 +103,9 @@ em_eo_register_error_handler(em_eo_t eo, em_error_handler_t handler)
                   "Invalid EO id %"PRI_EO"", eo);
 
   eo_elem = get_eo_element(eo);
-
+  
   eo_elem->error_handler_func = handler;
-
+  
   return EM_OK;
 }
 
@@ -153,7 +133,7 @@ em_eo_unregister_error_handler(em_eo_t eo)
   eo_elem = get_eo_element(eo);
 
   eo_elem->error_handler_func = NULL;
-  
+
   return EM_OK;
 }
 
@@ -177,11 +157,14 @@ em_eo_unregister_error_handler(em_eo_t eo)
 em_status_t
 em_register_error_handler(em_error_handler_t handler)
 {
-  env_spinlock_lock(&em_error_handler_aligned.lock);
+  RETURN_ERROR_IF(!error_handler_initialized, EM_ERR_BAD_CONTEXT, EM_ESCOPE_REGISTER_ERROR_HANDLER,
+                  "Error Handling not yet initialized!");
   
-  em_error_handler_aligned.em_error_handler = handler;
+  env_spinlock_lock(&em.shm->em_error_handler_aligned.lock);
   
-  env_spinlock_unlock(&em_error_handler_aligned.lock);
+  em.shm->em_error_handler_aligned.em_error_handler = handler;
+  
+  env_spinlock_unlock(&em.shm->em_error_handler_aligned.lock);
 
   return EM_OK;
 }
@@ -201,11 +184,14 @@ em_register_error_handler(em_error_handler_t handler)
 em_status_t
 em_unregister_error_handler(void)
 {
-  env_spinlock_lock(&em_error_handler_aligned.lock);  
+  RETURN_ERROR_IF(!error_handler_initialized, EM_ERR_BAD_CONTEXT, EM_ESCOPE_UNREGISTER_ERROR_HANDLER,
+                  "Error Handling not yet initialized!");
   
-  em_error_handler_aligned.em_error_handler = em_default_error_handler;
+  env_spinlock_lock(&em.shm->em_error_handler_aligned.lock);  
   
-  env_spinlock_unlock(&em_error_handler_aligned.lock);  
+  em.shm->em_error_handler_aligned.em_error_handler = em_default_error_handler;
+  
+  env_spinlock_unlock(&em.shm->em_error_handler_aligned.lock);  
   
   return EM_OK;
 }
@@ -276,7 +262,7 @@ em_error_format_string(char* str, size_t size, em_eo_t eo, em_status_t error, em
     const char *base   = basename(file);
     char        eo_str[sizeof("EO:xxxxxx-abdc  ") + EM_EO_NAME_LEN];
     uint64_t loc_err_cnt  = em_core_local.error_count;                                            
-    uint64_t glob_err_cnt = rte_atomic64_read(&em_error_handler_aligned.global_error_count); 
+    uint64_t glob_err_cnt = rte_atomic64_read(&em.shm->em_error_handler_aligned.global_error_count); 
 
 
     if(eo == EM_EO_UNDEF) {
@@ -346,7 +332,7 @@ em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_l
   char     eo_str[sizeof("EO:xxxxxx-abdc  ") + EM_EO_NAME_LEN];
   int      core_id      = em_core_id();
   uint64_t loc_err_cnt  = em_core_local.error_count;
-  uint64_t glob_err_cnt = rte_atomic64_read(&em_error_handler_aligned.global_error_count); 
+  uint64_t glob_err_cnt = rte_atomic64_read(&em.shm->em_error_handler_aligned.global_error_count); 
   
   
   if(eo == EM_EO_UNDEF) {
@@ -377,7 +363,8 @@ em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_l
     const char *format = va_arg(args, const char*);
     const char *base   = basename(file);
   
-    printf("\n"
+    fprintf(stderr,
+           "\n"
            "EM ERROR:0x%08X  ESCOPE:0x%08X  %s" 
            "core:%02i ecount:%"PRIu64"(%"PRIu64")  "
            "%s(L:%i) "
@@ -389,16 +376,17 @@ em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_l
            base
           );
     
-    vprintf(format, args);    
+    vfprintf(stderr, format, args);    
     
-    printf("\n\n");
+    fprintf(stderr, "\n\n");
   }
   else
   {
     //
     // Note: Unknown va_list from application - don't touch.
     //
-    printf("\n"
+    fprintf(stderr,
+           "\n"
            "APPL ERROR:0x%08X  ESCOPE:0x%08X  %s"
            "core:%02i ecount:%"PRIu64"(%"PRIu64")  "
            "\n\n"
@@ -425,6 +413,92 @@ em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_l
 
 
 /**
+ * Early EM Error Handler
+ *
+ * The early error handler is used when reporting errors at startup before the default, 
+ * application and EO specific error handlers have been set up.
+ *
+ * @param eo      unused      
+ * @param error   The error code (reason), see em_status_e
+ * @param escope  The error scope from within the error was reported, also tells whether 
+                  the error was EM internal or application specific
+ * @param args    va_list of args
+ *
+ * @return The function may not return depending on implementation/error code/error scope. If it
+ * returns, the return value is the original (or modified) error code from the caller.
+ */
+static em_status_t
+em_early_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_list args)
+{
+  int core_id = em_internal_conf.conf.proc_idx; // use proc_idx since EM-core ID might not have been initialized yet.
+  
+  
+  if(EM_ESCOPE(escope))
+  {
+    //
+    // Note: va_list contains: __FILE__, __func__, __LINE__, (format), ## __VA_ARGS__
+    // as reported by the EM_INTERNAL_ERROR macro
+    //
+    char       *file    = va_arg(args, char*);
+    const char *func    = va_arg(args, const char*);
+    const int   line    = va_arg(args, const int);
+    const char *format  = va_arg(args, const char*);
+    const char *base    = basename(file);
+    
+    
+    (void) eo; // Unused
+    
+    fprintf(stderr,
+            "\n"
+            "EM ERROR:0x%08X  ESCOPE:0x%08X  (EarlyError)  " 
+            "core:%02i ecount:N/A  "
+            "%s(L:%i) "
+            "%s  "
+            ,
+            error, escope,
+            core_id,
+            func, line, base
+           );
+    
+    vfprintf(stderr, format, args);
+    
+    fprintf(stderr, "\n\n");
+  }
+  else
+  {
+    //
+    // Note: Unknown va_list from application - don't touch.
+    //
+    fprintf(stderr,
+            "\n"
+            "APPL ERROR:0x%08X  ESCOPE:0x%08X  (EarlyError)"
+            "core:%02i  ecount:N/A  "
+            "\n\n"
+            ,
+            error, escope,
+            core_id
+           );
+    
+  }
+  
+  
+  IF_UNLIKELY(EM_ERROR_IS_FATAL(error))
+  {
+    /* Abort process, flush all open streams, dump stack, generate core dump, never return */
+    rte_panic("\n"
+              "FATAL ERROR:0x%08X on core:%02i ecount:N/A - ABORT!"
+              "\n\n",
+              error, core_id);
+  }
+  
+  
+  return error;
+}
+
+
+
+
+/**
  * Select and call an error handler.
  *
  * @param error         Error code
@@ -436,35 +510,42 @@ em_default_error_handler(em_eo_t eo, em_status_t error, em_escope_t escope, va_l
 static em_status_t
 select_error_handler(em_status_t error, em_escope_t escope, va_list args_list)
 {
-  em_eo_element_t   *eo_elem;
-  em_eo_t            eo;
-  em_error_handler_t error_handler;
-
-
-  eo_elem       = get_current_eo_elem();
-  eo            = EM_EO_UNDEF;
-  error_handler = em_error_handler_aligned.em_error_handler;
-
-  if(eo_elem)
+  IF_UNLIKELY(!error_handler_initialized)
   {
-    eo = eo_elem->id;
-
-    if(eo_elem->error_handler_func)
-    {
-      error_handler = eo_elem->error_handler_func;
+    /* Early errors reported at startup before errhandling is properly initialized */
+    error = em_early_error_handler(EM_EO_UNDEF, error, escope, args_list);
+  }
+  else
+  {
+    em_eo_element_t   *eo_elem       = get_current_eo_elem();
+    em_eo_t            eo            = EM_EO_UNDEF;
+    em_error_handler_t error_handler = em_default_error_handler;
+    
+    if(em.shm != NULL) {
+      error_handler = em.shm->em_error_handler_aligned.em_error_handler;
     }
-  }
-
-  if(error_handler)
-  {
-    // Call the selected error handler and possibly change the error code.
-    error = error_handler(eo, error, escope, args_list);
-  }
-  
-  if(error != EM_OK) {
-    // Increase the error count, used in logs/printouts
-    rte_atomic64_inc(&em_error_handler_aligned.global_error_count);
-    em_core_local.error_count += 1; 
+    
+    if(eo_elem)
+    {
+      eo = eo_elem->id;
+    
+      if(eo_elem->error_handler_func)
+      {
+        error_handler = eo_elem->error_handler_func;
+      }
+    }
+    
+    if(error_handler)
+    {
+      // Call the selected error handler and possibly change the error code.
+      error = error_handler(eo, error, escope, args_list);
+    }
+    
+    if(error != EM_OK) {
+      // Increase the error count, used in logs/printouts
+      rte_atomic64_inc(&em.shm->em_error_handler_aligned.global_error_count);
+      em_core_local.error_count += 1; 
+    }
   }
   
   // Return input error or value changed by error_handler
@@ -500,19 +581,41 @@ _em_internal_error(em_status_t error, em_escope_t escope, ...)
 
 
 
+/**
+ * Internal
+ * Initialize the EM Error Handling
+ */
 void
 em_error_init(void)
 {
-  env_spinlock_init(&em_error_handler_aligned.lock);
+  env_spinlock_init(&em.shm->em_error_handler_aligned.lock);
+
+  em.shm->em_error_handler_aligned.em_error_handler = em_default_error_handler; 
   
-  em_error_handler_aligned.em_error_handler = em_default_error_handler; 
+  rte_atomic64_init(&em.shm->em_error_handler_aligned.global_error_count); 
   
-  rte_atomic64_init(&em_error_handler_aligned.global_error_count); 
-  
+  error_handler_initialized = 1;
   
   // TEST:
   // (void) EM_INTERNAL_ERROR(0x0000acdc, EM_ESCOPE_INTERNAL_TEST, "Test Error Reporting 1/2");
   // (void) EM_INTERNAL_ERROR(0x0000abba, EM_ESCOPE_INTERNAL_TEST, "Test Error Reporting 2/2  args:%u %s %f", 1, "arg2", 0.3);
+}
+
+
+/**
+ * Internal
+ * Initialze the EM error handling for child processes
+ */
+void
+em_error_init_secondary(void)
+{
+  if((em.shm == NULL) || (em.shm->em_error_handler_aligned.em_error_handler != em_default_error_handler))
+  {
+    // Report error, uses em_early_error_handler()
+    em_error(EM_FATAL(EM_ERR_BAD_CONTEXT), EM_ESCOPE_INIT, "Error handling not properly initialized!");
+  }
+  
+  error_handler_initialized = 1;
 }
 
 

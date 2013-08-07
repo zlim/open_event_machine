@@ -48,13 +48,10 @@
  */
 #define RX_DIRECT_DISPATCH       (0) // 0=Off(lower performance,  better priority handling)
                                      // 1=On (better performance, weaker priority)
-
                                    
 #define MAX_ETH_PORTS            (16)
 
-
-#define MAX_ETH_RX_QUEUES        (MAX_ETH_PORTS * MAX_CORES)
-
+#define MAX_ETH_RX_QUEUES        (MAX_ETH_PORTS * EM_MAX_CORES)
 
 #if RX_DIRECT_DISPATCH == 1
   #define MAX_ETH_TX_MBUF_TABLES (16) // Keep power-of-two!
@@ -64,9 +61,10 @@
 
 #define TX_MBUF_TABLE_MASK       (MAX_ETH_TX_MBUF_TABLES - 1)
 
+#define PACKET_Q_HASH_ENTRIES    (4096)
+
 
 #define EM_QUEUE_TO_MBUF_TBL(em_queue_id) ((em_queue_id) & (TX_MBUF_TABLE_MASK))
-
 
 
 /**< IP version 4 Packet Header */
@@ -80,6 +78,7 @@
 #else
 #define DEBUG_PRINT(...)   
 #endif
+
 
 
 /**< IP Header */
@@ -173,12 +172,78 @@ COMPILE_TIME_ASSERT((sizeof(packet_q_hash_key_t) % sizeof(uint32_t)) == 0, HASH_
 
 
 
+/**
+ * Eth Rx queue -> port mapping
+ */
+typedef struct
+{
+  uint8_t         port_id; 
+  
+  uint8_t         queue_id;
+
+} eth_rx_queue_info_t;
+
+
+
+/**
+ * Tx buffer for Eth frames that must be sent out in-order.
+ * One buffer per device (i.e. shared by all cores)
+ */
+typedef struct
+{
+  env_spinlock_t   lock    ENV_CACHE_LINE_ALIGNED;
+  
+  struct rte_ring *m_burst ENV_CACHE_LINE_ALIGNED;
+  
+} eth_tx_mbuf_table_t ENV_CACHE_LINE_ALIGNED;
+
+COMPILE_TIME_ASSERT((sizeof(eth_tx_mbuf_table_t) % ENV_CACHE_LINE_SIZE) == 0, ETH_TX_MBUF_TABLE_T__SIZE_ERROR);
+
+
+
+/**
+ * The Eth Rx port:queue access FIFO - a core dequeues a 'eth_rx_queue_info_t' and uses that port exclusively.
+ * When the core is done with the port it will enqueue it again for some other core to use.
+ */
+typedef union
+{
+  struct rte_ring *queue;
+    
+} eth_rx_queue_access_t;
+
+
+
+/*
+ * Grouping of shared variables that are almost always read-only
+ */
+typedef union
+{
+  struct
+  {
+    eth_ports_link_up_t    eth_ports_link_up;
+    
+    eth_rx_queue_access_t  eth_rx_queue_access;
+    
+    em_queue_t             em_default_queue;    
+  };
+    
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  
+} em_pkt_shared_readmostly_t;
+
+COMPILE_TIME_ASSERT((sizeof(em_pkt_shared_readmostly_t) % ENV_CACHE_LINE_SIZE) == 0, EM_PKT_SHARED_T_SIZE_ERROR);
+
+
+
+
 void
 intel_eth_init(void);
 
 void
 intel_eth_init_local(void);
 
+int 
+init_eth_pmd_drivers(void);
 
 void
 intel_init_packet_q_hash_global(void);

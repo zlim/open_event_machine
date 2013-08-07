@@ -62,10 +62,11 @@
  * Defines
  */
 
-#define APPL_ESCOPE_OTHER      1
-#define APPL_ESCOPE_STR        2
-#define APPL_ESCOPE_STR_Q      3
-#define APPL_ESCOPE_STR_Q_SEQ  4
+#define APPL_ESCOPE_INIT       1
+#define APPL_ESCOPE_OTHER      2
+#define APPL_ESCOPE_STR        3
+#define APPL_ESCOPE_STR_Q      4
+#define APPL_ESCOPE_STR_Q_SEQ  5
  
  
 #define DELAY_SPIN_COUNT       50000000
@@ -94,43 +95,47 @@ typedef struct
 /**
  * EO context of error test application 
  */
-typedef struct 
+typedef union
 {
-  /** EO Id */
-  em_eo_t      eo;
+  struct 
+  {
+    /** EO Id */
+    em_eo_t      eo;
+    
+    /** EO name */
+    char         name[16];
+    
+    /** Delay spin counter */
+    volatile int spins;
+  };
   
-  /** EO name */
-  char         name[16];
+  /** Pad to cache line size */
+  uint8_t u8[ENV_CACHE_LINE_SIZE];  
   
-  /** Delay spin counter */
-  volatile int spins;
-}eo_context_t;
+} eo_context_t;
 
 
 
 /**
- * EO context padded to cache line size.
+ * Error test shared memory
  */
-typedef union 
+typedef struct
 {
-  /** The EO context data */
-  eo_context_t eo_ctx;
+  /** EO contexts from shared memory region */
+  eo_context_t  eo_error_a  ENV_CACHE_LINE_ALIGNED;
   
-  /** Pad EO context to cache line size */
-  uint8_t u8[ENV_CACHE_LINE_SIZE];
+  eo_context_t  eo_error_b  ENV_CACHE_LINE_ALIGNED;
   
-} eo_context_pad_t;
+  eo_context_t  eo_error_c  ENV_CACHE_LINE_ALIGNED;
+  
+  /* Queue IDs - use shared vars since this test is NOT concerned with performance. */
+  em_queue_t queue_a        ENV_CACHE_LINE_ALIGNED;
+  em_queue_t queue_b;
+  em_queue_t queue_c;
+  
+} error_shm_t;
 
-
-
-/** Allocate EO contexts from shared memory region */
-ENV_SHARED  static  eo_context_pad_t  eo_error_a  ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  static  eo_context_pad_t  eo_error_b  ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  static  eo_context_pad_t  eo_error_c  ENV_CACHE_LINE_ALIGNED;
-
-
-// Queue IDs - use shared vars since this test is NOT concerned with performance.
-ENV_SHARED static em_queue_t queue_a, queue_b, queue_c;
+static ENV_LOCAL error_shm_t *error_shm = NULL;
 
 
 
@@ -163,19 +168,33 @@ delay_spin(eo_context_t* eo_ctx);
 /**
  * Init and startup of the Error Handler test application.
  *
- * @see main() and example_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(example_conf_t *const example_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t        eo;
+  em_queue_t     queue;
   em_event_t     event;
   error_event_t* error;
   em_status_t    ret;  
 
   
+  if(em_core_id() == 0) {
+    error_shm = env_shared_reserve("ErrorSharedMem", sizeof(error_shm_t));
+  }
+  else {
+    error_shm = env_shared_lookup("ErrorSharedMem");
+  }
+  
+
+  if(error_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), APPL_ESCOPE_INIT, "Error init failed on EM-core: %u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
@@ -190,12 +209,12 @@ test_init(example_conf_t *const example_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         example_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         example_conf->num_procs,
-         example_conf->num_threads);
+         appl_conf->num_procs,
+         appl_conf->num_threads);
          
   
   /* 
@@ -208,19 +227,23 @@ test_init(example_conf_t *const example_conf)
   /*
    * Create and start EO "A"
    */
-  eo      = em_eo_create("EO A", error_start, NULL, error_stop, NULL, error_receive, &eo_error_a.eo_ctx);
-  queue_a = em_queue_create("queue A", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+  eo    = em_eo_create("EO A", error_start, NULL, error_stop, NULL, error_receive, &error_shm->eo_error_a);
+  queue = em_queue_create("queue A", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
   
-  if((ret = em_eo_add_queue(eo, queue_a)) != EM_OK)
+  if((ret = em_eo_add_queue(eo, queue)) != EM_OK)
   {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xdead), APPL_ESCOPE_INIT,
+             "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
 
-  if((ret = em_queue_enable(queue_a)) != EM_OK)
+  error_shm->queue_a = queue;
+
+  if((ret = em_queue_enable(queue)) != EM_OK)
   {
-    printf("Queue A enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_a);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xbeef), APPL_ESCOPE_INIT,
+             "Queue A enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
 
   /*
@@ -230,22 +253,26 @@ test_init(example_conf_t *const example_conf)
   em_eo_start(eo, NULL, 0, NULL);
 
 
-  //
-  // Create and start EO "B"
-  //
-  eo      = em_eo_create("EO B", error_start, NULL, error_stop, NULL, error_receive, &eo_error_b.eo_ctx);
-  queue_b = em_queue_create("queue B", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+  /*
+   * Create and start EO "B"
+   */
+  eo    = em_eo_create("EO B", error_start, NULL, error_stop, NULL, error_receive, &error_shm->eo_error_b);
+  queue = em_queue_create("queue B", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
 
-  if((ret = em_eo_add_queue(eo, queue_b)) != EM_OK)
+  if((ret = em_eo_add_queue(eo, queue)) != EM_OK)
   {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xacdc), APPL_ESCOPE_INIT,
+             "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
   
-  if((ret = em_queue_enable(queue_b)) != EM_OK)
+  error_shm->queue_b = queue;
+  
+  if((ret = em_queue_enable(queue)) != EM_OK)
   {
-    printf("Queue B enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_b);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xabba), APPL_ESCOPE_INIT,
+             "Queue B enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
   
   /* Note: No 'EO B' specific error handler, use the application specific global error handler instead. */
@@ -255,19 +282,23 @@ test_init(example_conf_t *const example_conf)
   /*
    * Create and start EO "C"
    */
-  eo      = em_eo_create("EO C", error_start, NULL, error_stop, NULL, error_receive, &eo_error_c.eo_ctx);
-  queue_c = em_queue_create("queue C", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
+  eo    = em_eo_create("EO C", error_start, NULL, error_stop, NULL, error_receive, &error_shm->eo_error_c);
+  queue = em_queue_create("queue C", EM_QUEUE_TYPE_ATOMIC, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
 
-  if((ret = em_eo_add_queue(eo, queue_c)) != EM_OK)
+  if((ret = em_eo_add_queue(eo, queue)) != EM_OK)
   {
-    printf("EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xf00), APPL_ESCOPE_INIT,
+             "EO or queue creation failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
+  
+  error_shm->queue_c = queue;
 
-  if((ret = em_queue_enable(queue_c)) != EM_OK)
+  if((ret = em_queue_enable(queue)) != EM_OK)
   {
-    printf("Queue C enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n", ret, eo, queue_c);
-    return;
+    em_error(EM_ERROR_SET_FATAL(0xbad), APPL_ESCOPE_INIT,
+             "Queue C enable failed (%i). EO: %"PRI_EO", queue: %"PRI_QUEUE"\n",
+             ret, eo, queue);
   }
 
   /* Note: No 'EO C' specific error handler, use the application specific global error handler instead. */
@@ -284,11 +315,11 @@ test_init(example_conf_t *const example_conf)
 
   error = em_event_pointer(event);
 
-  error->dest  = queue_b;
+  error->dest  = error_shm->queue_b;
   error->seq   = 0;
   error->fatal = 0;
 
-  em_send(event, queue_a);
+  em_send(event, error_shm->queue_a);
 
 
   /*
@@ -303,7 +334,7 @@ test_init(example_conf_t *const example_conf)
   error->seq   = 0;
   error->fatal = 1; // generate a fatal error when received
 
-  em_send(event, queue_c);
+  em_send(event, error_shm->queue_c);
 }
 
 
@@ -434,9 +465,10 @@ combined_error_handler(const char* handler_name, em_eo_t eo, em_status_t error, 
 static void
 error_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue_t queue, void* q_ctx)
 {
-  error_event_t* error;
+  error_event_t *error;
   em_queue_t     dest;
-  eo_context_t* eo_ctx = eo_context;
+  eo_context_t  *eo_ctx = eo_context;
+
 
   error = em_event_pointer(event);
 
@@ -492,7 +524,7 @@ error_receive(void* eo_context, em_event_t event, em_event_type_t type, em_queue
     error->seq   = 0;
     error->fatal = 1;
 
-    em_send(event, queue_c);
+    em_send(event, error_shm->queue_c);
   }
 
 }

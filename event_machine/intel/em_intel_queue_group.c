@@ -35,7 +35,9 @@
 #include "em_internal_event.h"
 #include "em_error.h"
 
+#include "em_shared_data.h"
 
+#include "em_intel_inline.h"
 
 /**
  * em_queue_group_modify() triggers an internal 'Done'-notification event
@@ -56,13 +58,6 @@ typedef struct
   em_queue_group_t queue_group;
   
 } q_grp_delete_done_callback_args_t;
-
-
-// Queue group table
-ENV_SHARED  em_queue_group_element_t  em_queue_group[EM_MAX_QUEUE_GROUPS]  ENV_CACHE_LINE_ALIGNED;
-ENV_SHARED  em_spinlock_t             em_queue_group_lock                  ENV_CACHE_LINE_ALIGNED;
-
-COMPILE_TIME_ASSERT((sizeof(em_queue_group) % ENV_CACHE_LINE_SIZE) == 0, EM_QUEUE_GROUP_TBL_SIZE_ERROR);
 
 
 
@@ -125,7 +120,7 @@ queue_group_find(const char* name)
 
   for(i = 0; i < EM_MAX_QUEUE_GROUPS; i++)
   {
-    if(em_queue_group[i].allocated  && (em_queue_group[i].name_u64 == name_u64) )
+    if(em.shm->em_queue_group[i].allocated  && (em.shm->em_queue_group[i].name_u64 == name_u64) )
     {
       queue_group = i;
       break;
@@ -155,28 +150,28 @@ queue_group_init_global(void)
 
   num_cores = em_core_count();
 
-  env_spinlock_init(&em_queue_group_lock.lock);
+  env_spinlock_init(&em.shm->em_queue_group_lock.lock);
 
-  (void) memset(em_queue_group, 0, sizeof(em_queue_group));
+  (void) memset(em.shm->em_queue_group, 0, sizeof(em.shm->em_queue_group));
 
 
   for(i = 0; i < EM_MAX_QUEUE_GROUPS; i++) {
-    m_list_init(&em_queue_group[i].list_head);
+    m_list_init(&em.shm->em_queue_group[i].list_head);
   }
 
 
   //
   // Reserve the default queue group.
   // 
-  em_queue_group[EM_QUEUE_GROUP_DEFAULT].allocated = 1;
+  em.shm->em_queue_group[EM_QUEUE_GROUP_DEFAULT].allocated = 1;
   // Copy at most EM_QUEUE_GROUP_NAME_LEN characters
-  (void) strncpy(em_queue_group[EM_QUEUE_GROUP_DEFAULT].name,
+  (void) strncpy(em.shm->em_queue_group[EM_QUEUE_GROUP_DEFAULT].name,
                  EM_QUEUE_GROUP_DEFAULT_NAME, EM_QUEUE_GROUP_NAME_LEN);
   // Force trailing zero, name-len is EM_QUEUE_GROUP_NAME_LEN+1 
-  em_queue_group[EM_QUEUE_GROUP_DEFAULT].name[EM_QUEUE_GROUP_NAME_LEN] = '\0'; 
+  em.shm->em_queue_group[EM_QUEUE_GROUP_DEFAULT].name[EM_QUEUE_GROUP_NAME_LEN] = '\0'; 
   // Set bit for all cores, they are now part of the default queue group - Note that em_queue_group_modify() canot be used yet.
-  em_core_mask_zero(&em_queue_group[EM_QUEUE_GROUP_DEFAULT].mask);
-  em_core_mask_set_count(num_cores, &em_queue_group[EM_QUEUE_GROUP_DEFAULT].mask);  
+  em_core_mask_zero(&em.shm->em_queue_group[EM_QUEUE_GROUP_DEFAULT].mask);
+  em_core_mask_set_count(num_cores, &em.shm->em_queue_group[EM_QUEUE_GROUP_DEFAULT].mask);  
 
 
   //
@@ -222,7 +217,7 @@ queue_group_init_global(void)
     }
   
     // Set queue group masks manually, em_queue_group_modify() cannot be used yet
-    em_core_mask_copy(&em_queue_group[group].mask, &mask);
+    em_core_mask_copy(&em.shm->em_queue_group[group].mask, &mask);
   
     (void) snprintf(&queue_name[14], EM_QUEUE_NAME_LEN-14, "%"PRI_QUEUE"", queue);
     queue_name[EM_QUEUE_NAME_LEN-1] = '\0';
@@ -362,7 +357,7 @@ em_queue_group_create(const char* name, const em_core_mask_t* mask, int num_noti
   }  
 
 
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
   
   queue_group = queue_group_find(name);
@@ -372,7 +367,7 @@ em_queue_group_create(const char* name, const em_core_mask_t* mask, int num_noti
            "Queue group name (%s) already in use!", name)
   {
     // Name already reserved
-    env_spinlock_unlock(&em_queue_group_lock.lock);
+    env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
     return EM_QUEUE_GROUP_UNDEF;
   }
   
@@ -382,23 +377,23 @@ em_queue_group_create(const char* name, const em_core_mask_t* mask, int num_noti
   // If no matching group found, find next free
   for(i = 0; i < EM_MAX_QUEUE_GROUPS; i++)
   {
-    if(em_queue_group[i].allocated == 0)
+    if(em.shm->em_queue_group[i].allocated == 0)
     {
       // Init queue group
       queue_group = i;
-      (void) memset(&em_queue_group[queue_group], 0, sizeof(em_queue_group[0]));
-      em_queue_group[queue_group].allocated = 1;
-      //em_core_mask_copy(&em_queue_group[queue_group].mask, mask);
+      (void) memset(&em.shm->em_queue_group[queue_group], 0, sizeof(em.shm->em_queue_group[0]));
+      em.shm->em_queue_group[queue_group].allocated = 1;
+      //em_core_mask_copy(&em.shm->em_queue_group[queue_group].mask, mask);
 
-      strncpy(em_queue_group[queue_group].name, name, EM_QUEUE_GROUP_NAME_LEN); // copy at most EM_QUEUE_GROUP_NAME_LEN characters
-      em_queue_group[queue_group].name[EM_QUEUE_GROUP_NAME_LEN] = '\0';         // force trailing zero
+      strncpy(em.shm->em_queue_group[queue_group].name, name, EM_QUEUE_GROUP_NAME_LEN); // copy at most EM_QUEUE_GROUP_NAME_LEN characters
+      em.shm->em_queue_group[queue_group].name[EM_QUEUE_GROUP_NAME_LEN] = '\0';         // force trailing zero
       
-      m_list_init(&em_queue_group[queue_group].list_head);
+      m_list_init(&em.shm->em_queue_group[queue_group].list_head);
       break;
     }
   }
 
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
 
   ERROR_IF(queue_group == EM_QUEUE_GROUP_UNDEF, EM_ERR_ALLOC_FAILED, EM_ESCOPE_QUEUE_GROUP_CREATE,
@@ -475,8 +470,8 @@ queue_group_modify(em_queue_group_t group, const em_core_mask_t* new_mask, int n
   em_core_mask_t       old_mask, max_mask;
   em_event_group_t     event_group;
   int                  adds, rems, i;
-  uint8_t              add_core[RTE_MAX_LCORE];
-  uint8_t              rem_core[RTE_MAX_LCORE];
+  uint8_t              add_core[EM_MAX_CORES];
+  uint8_t              rem_core[EM_MAX_CORES];
   em_status_t          err;
   em_event_t           event;
   em_internal_event_t *i_event;
@@ -490,7 +485,7 @@ queue_group_modify(em_queue_group_t group, const em_core_mask_t* new_mask, int n
 
   // printf("EM-core%02i: %s(): "
   //        "Queue Group (%"PRI_QGRP") Mask update request: new=0x%"PRIX64" old=0x%"PRIX64"\n",
-  //        em_core_id(), __func__, group, new_mask->u64[0], em_queue_group[group].mask.u64[0]);
+  //        em_core_id(), __func__, group, new_mask->u64[0], em.shm->em_queue_group[group].mask.u64[0]);
 
 
   RETURN_ERROR_IF(invalid_qgrp(group), EM_ERR_BAD_ID, EM_ESCOPE_QUEUE_GROUP_MODIFY,
@@ -514,20 +509,20 @@ queue_group_modify(em_queue_group_t group, const em_core_mask_t* new_mask, int n
 
 
 
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
 
-  IF_UNLIKELY(!em_queue_group[group].allocated)
+  IF_UNLIKELY(!em.shm->em_queue_group[group].allocated)
   {
-    env_spinlock_unlock(&em_queue_group_lock.lock);
+    env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
     return EM_INTERNAL_ERROR(EM_ERR_BAD_ID, EM_ESCOPE_QUEUE_GROUP_MODIFY, "Queue group not allocated...");
   }
   
   
-  IF_UNLIKELY(em_queue_group[group].pending_modify)
+  IF_UNLIKELY(em.shm->em_queue_group[group].pending_modify)
   {
-    env_spinlock_unlock(&em_queue_group_lock.lock);
+    env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
     return EM_INTERNAL_ERROR(EM_ERROR, EM_ESCOPE_QUEUE_GROUP_MODIFY, "Pending queue group modify.");
   }
@@ -536,7 +531,7 @@ queue_group_modify(em_queue_group_t group, const em_core_mask_t* new_mask, int n
   //
   // If the new mask is equal to the one in use: send notifs immediately and return
   //
-  em_core_mask_copy(&old_mask, &em_queue_group[group].mask);
+  em_core_mask_copy(&old_mask, &em.shm->em_queue_group[group].mask);
   
   if(em_core_mask_equal(&old_mask, new_mask))
   {
@@ -546,11 +541,11 @@ queue_group_modify(em_queue_group_t group, const em_core_mask_t* new_mask, int n
   else
   {
     // Set the pending modify flag to catch contending modifies
-    em_queue_group[group].pending_modify = 1;
+    em.shm->em_queue_group[group].pending_modify = 1;
   }
   
   
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
 
 
@@ -758,14 +753,14 @@ em_queue_group_mask(em_queue_group_t group, em_core_mask_t* mask)
                   "Invalid queue group: %"PRI_QGRP"", group);
   
   
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
-  allocated      = em_queue_group[group].allocated;
-  pending_modify = em_queue_group[group].pending_modify;
+  allocated      = em.shm->em_queue_group[group].allocated;
+  pending_modify = em.shm->em_queue_group[group].pending_modify;
   
-  em_core_mask_copy(mask, &em_queue_group[group].mask);
+  em_core_mask_copy(mask, &em.shm->em_queue_group[group].mask);
   
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
   
   
   RETURN_ERROR_IF((!allocated) || (pending_modify), EM_FATAL(EM_ERR_BAD_STATE), EM_ESCOPE_QUEUE_GROUP_MASK,
@@ -881,17 +876,17 @@ q_grp_modify_done_callback(void *arg_ptr)
 static void 
 q_grp_modify_done(em_queue_group_t queue_group, em_core_mask_t *new_mask)
 {
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
   // Now modify is complete, update the mask
-  em_core_mask_copy(&em_queue_group[queue_group].mask, new_mask);
-  em_queue_group[queue_group].pending_modify = 0;
+  em_core_mask_copy(&em.shm->em_queue_group[queue_group].mask, new_mask);
+  em.shm->em_queue_group[queue_group].pending_modify = 0;
   
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
   // printf("EM-core%02i: QUEUE_GROUP_MODIFY DONE internal event - "
   //        "Queue Group (%"PRI_QGRP") Mask updated to 0x%"PRIX64" (0x%"PRIX64")\n",
-  //        em_core_id(), queue_group, new_mask->u64[0], em_queue_group[queue_group].mask.u64[0]);
+  //        em_core_id(), queue_group, new_mask->u64[0], em.shm->em_queue_group[queue_group].mask.u64[0]);
   //        
   // print_queue_groups();
   // fflush(NULL);
@@ -920,21 +915,21 @@ q_grp_delete_done_callback(void *arg_ptr)
 static void 
 q_grp_delete_done(em_queue_group_t queue_group)
 {
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
  
   
-  IF_UNLIKELY(!em_core_mask_iszero(&em_queue_group[queue_group].mask))
+  IF_UNLIKELY(!em_core_mask_iszero(&em.shm->em_queue_group[queue_group].mask))
   {
-    env_spinlock_unlock(&em_queue_group_lock.lock);
+    env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
     EM_INTERNAL_ERROR(EM_FATAL(EM_ERR_BAD_STATE), EM_ESCOPE_QUEUE_GROUP_DELETE,
                       "Queue group mask not zero in delete...");
   }
   
   
-  IF_UNLIKELY(!m_list_is_empty(&em_queue_group[queue_group].list_head))
+  IF_UNLIKELY(!m_list_is_empty(&em.shm->em_queue_group[queue_group].list_head))
   {
-    env_spinlock_unlock(&em_queue_group_lock.lock);
+    env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 
     EM_INTERNAL_ERROR(EM_FATAL(EM_ERR_BAD_STATE), EM_ESCOPE_QUEUE_GROUP_DELETE,
                       "Queue group still has queues associated with it, cannot delete!");
@@ -942,9 +937,9 @@ q_grp_delete_done(em_queue_group_t queue_group)
   
   
   // Clear the Queue Group data
-  (void) memset(&em_queue_group[queue_group], 0, sizeof(em_queue_group[0]));
+  (void) memset(&em.shm->em_queue_group[queue_group], 0, sizeof(em.shm->em_queue_group[0]));
 
-  env_spinlock_unlock(&em_queue_group_lock.lock);  
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);  
 }
 
 
@@ -955,11 +950,11 @@ queue_group_add_queue_list(em_queue_group_t queue_group, em_queue_t queue)
   em_queue_element_t *const q_elem = get_queue_element(queue);
   
   
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
-  m_list_add(&em_queue_group[queue_group].list_head, &q_elem->qgrp_node);
+  m_list_add(&em.shm->em_queue_group[queue_group].list_head, &q_elem->qgrp_node);
   
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 }
 
 
@@ -968,15 +963,15 @@ void
 queue_group_rem_queue_list(em_queue_group_t queue_group, em_queue_t queue)
 {
   em_queue_element_t *const q_elem    = get_queue_element(queue);
-  m_list_head_t      *const list_head = &em_queue_group[queue_group].list_head;
+  m_list_head_t      *const list_head = &em.shm->em_queue_group[queue_group].list_head;
   
-  env_spinlock_lock(&em_queue_group_lock.lock);
+  env_spinlock_lock(&em.shm->em_queue_group_lock.lock);
   
   if(!m_list_is_empty(list_head)) {
     m_list_rem(list_head, &q_elem->qgrp_node);
   }
   
-  env_spinlock_unlock(&em_queue_group_lock.lock);
+  env_spinlock_unlock(&em.shm->em_queue_group_lock.lock);
 }
 
 
@@ -991,9 +986,9 @@ print_queue_groups(void)
 
   for(i = 0; i < EM_MAX_QUEUE_GROUPS; i++)
   {
-    if(em_queue_group[i].allocated)
+    if(em.shm->em_queue_group[i].allocated)
     {
-      printf("  %2i  %8s 0x%lx\n", i, em_queue_group[i].name, em_queue_group[i].mask.u64[0]);
+      printf("  %2i  %8s 0x%lx\n", i, em.shm->em_queue_group[i].name, em.shm->em_queue_group[i].mask.u64[0]);
     }
   }
 

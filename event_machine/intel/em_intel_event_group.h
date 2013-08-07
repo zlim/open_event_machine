@@ -37,7 +37,7 @@
 #define EM_INTEL_EVENT_GROUP_H_
 
 
-#include "em_intel.h"
+//#include "em_intel.h"
 #include "em_error.h"
 
 
@@ -73,7 +73,6 @@ COMPILE_TIME_ASSERT(sizeof(em_event_group_entry_tbl_lock_t) == ENV_CACHE_LINE_SI
 /*
  * Externs
  */
-extern ENV_SHARED em_event_group_entry_t em_event_group_entry_tbl[];
 
 
 
@@ -105,51 +104,8 @@ event_group_alloc_init(void);
  *
  * @return EM_OK if successful.
  */
-static inline void
-event_group_count_update(em_event_group_t event_group)
-{
-  em_event_group_entry_t *const group_e = &em_event_group_entry_tbl[event_group];
-  
-  uint64_t old, new;
-  int      ret;
-  
-
-  env_sync_mem();
-
-  ret = 0;
-
-  do
-  {
-    old = group_e->count;
-
-    IF_UNLIKELY(old == 0)
-    {
-      (void) EM_INTERNAL_ERROR(EM_ERR_BAD_ID, EM_ESCOPE_EVENT_GROUP_UPDATE,
-                               "Group count already 0!\n");
-      return;
-    }
-
-    new = old - 1;
-
-    ret = rte_atomic64_cmpset(&group_e->count, old, new);
-  }
-  while(ret == 0);
-
-
-
-  if(new == 0)
-  { // Last event in the group
-
-    int i;
-
-    for(i = 0; i < group_e->num_notif; i++)
-    {
-      em_send(group_e->notif_tbl[i].event, group_e->notif_tbl[i].queue);
-    }
-  }
-
-  return;
-}
+void
+event_group_count_update(em_event_group_t event_group);
 
 
 #endif

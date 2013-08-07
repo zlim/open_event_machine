@@ -38,6 +38,8 @@
 #include "em_intel_queue_group.h"
 #include "em_error.h"
 
+#include "em_intel_inline.h"
+
 #include <rte_debug.h>
 
 

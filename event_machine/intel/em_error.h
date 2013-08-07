@@ -86,6 +86,35 @@
 
 
 /**
+ * EM Error Handler
+ */
+ 
+typedef union
+{
+  struct 
+  {
+    // Global Error Handler (func ptr or NULL)
+    em_error_handler_t  em_error_handler  ENV_CACHE_LINE_ALIGNED;
+    
+    // Global Error Count
+    rte_atomic64_t      global_error_count;
+    
+    // Spinlock
+    env_spinlock_t      lock;
+  };
+  
+  // Guarantees that size is 1*cache-line-size
+  uint8_t u8[ENV_CACHE_LINE_SIZE];
+
+} em_error_handler_aligned_t;
+
+
+COMPILE_TIME_ASSERT(sizeof(em_error_handler_aligned_t) == ENV_CACHE_LINE_SIZE, EM_ERROR_HANDER_ALIGNED_T_SIZE_ERROR);
+
+
+
+
+/**
  * EM internal error 
  */
  
@@ -100,6 +129,8 @@ _em_internal_error(em_status_t error, em_escope_t escope, ...);
 
 void em_error_init(void);
 
+void
+em_error_init_secondary(void);
 
 
 

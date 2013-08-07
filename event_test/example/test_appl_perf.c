@@ -100,8 +100,8 @@
  * For better error handling see the API funcs: em_error(), em_register_error_handler(),  
  * em_eo_register_error_handler() etc.
  */
-#define ERROR_PRINT(...)     {printf("ERROR: file: %s line: %d\n", __FILE__, __LINE__); \
-                              printf(__VA_ARGS__); fflush(NULL); abort();}
+#define ERROR_PRINT(...)      {fprintf(stderr, "\nAPPL ERROR: %s %s(line:%d) - EM-core%02i: ", __FILE__, __func__, __LINE__, em_core_id()); \
+                               fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n\n"); abort();}
 
 #define IS_ERROR(cond, ...)    \
   if(ENV_UNLIKELY( (cond) )) { \
@@ -128,12 +128,7 @@ typedef union
 
 }perf_stat_t;
 
-
-/** Array of core specific data accessed by a core using its core index. */
-ENV_SHARED  static  perf_stat_t  core_stat[MAX_NBR_OF_CORES];
-
 COMPILE_TIME_ASSERT( sizeof(perf_stat_t) == ENV_CACHE_LINE_SIZE,       PERF_STAT_T_SIZE_ERROR);
-COMPILE_TIME_ASSERT((sizeof(core_stat)   %  ENV_CACHE_LINE_SIZE) == 0, CORE_STAT_ARR_SIZE_ERROR);
 
 
 
@@ -148,7 +143,7 @@ typedef struct
   /** Next sequence number (used with CHECK_SEQ_PER_EVENT) */
   int next_seq;
   
-}eo_context_t;
+} eo_context_t;
 
 
 
@@ -164,10 +159,6 @@ typedef union
 } eo_context_array_elem_t;
 
 COMPILE_TIME_ASSERT(sizeof(eo_context_array_elem_t) == ENV_CACHE_LINE_SIZE, PERF_EO_CONTEXT_SIZE_ERROR);
-
-
-/** EO context array */
-ENV_SHARED static  eo_context_array_elem_t  perf_eo_context[NUM_EO];
 
 
 
@@ -186,6 +177,25 @@ typedef struct
   uint8_t data[DATA_SIZE];
 
 } perf_event_t;
+
+
+
+/**
+ * Perf test shared memory
+ */
+typedef struct
+{
+  /** EO context array */
+  eo_context_array_elem_t  perf_eo_context[NUM_EO]  ENV_CACHE_LINE_ALIGNED;
+  
+  /** Array of core specific data accessed by a core using its core index. */
+  perf_stat_t  core_stat[MAX_NBR_OF_CORES]  ENV_CACHE_LINE_ALIGNED;  
+  
+} perf_shm_t;
+
+
+/** EM-core local pointer to shared memory */
+static ENV_LOCAL perf_shm_t *perf_shm = NULL;
 
 
 
@@ -212,10 +222,10 @@ print_result(perf_stat_t *const perf_stat);
 /**
  * Init and startup of the Perf Test test application.
  *
- * @see main() and example_start() for setup and dispatch.
+ * @see main() and application_start() for setup and dispatch.
  */
 void
-test_init(example_conf_t *const example_conf)
+test_init(appl_conf_t *const appl_conf)
 {
   em_eo_t          eo;
   eo_context_t*    eo_ctx;
@@ -225,9 +235,22 @@ test_init(example_conf_t *const example_conf)
   em_status_t      ret;
   int              i, j;
   
-  
+
+  if(em_core_id() == 0) {
+    perf_shm = env_shared_reserve("PerfSharedMem", sizeof(perf_shm_t));
+  }
+  else {
+    perf_shm = env_shared_lookup("PerfSharedMem");
+  }
+
+
+  if(perf_shm == NULL) {
+    em_error(EM_ERROR_SET_FATAL(0xec0de), 0xdead, "Perf init failed on EM-core:%u\n", em_core_id());
+  }
+    
+
   /*
-   * Initializations only on one EM-core, return on all others.
+   * Rest of the initializations only on one EM-core, return on all others.
    */  
   if(em_core_id() != 0)
   {
@@ -242,15 +265,15 @@ test_init(example_conf_t *const example_conf)
          "\n**********************************************************************\n"
          "\n"
          ,
-         example_conf->name,
+         appl_conf->name,
          NO_PATH(__FILE__), __func__,
          em_core_id(),
          em_core_count(),
-         example_conf->num_procs,
-         example_conf->num_threads);
+         appl_conf->num_procs,
+         appl_conf->num_threads);
          
            
-  (void) memset(core_stat, 0, sizeof(core_stat));
+  (void) memset(perf_shm->core_stat, 0, sizeof(perf_shm->core_stat));
 
   /*
    * Create and start application pairs
@@ -261,7 +284,7 @@ test_init(example_conf_t *const example_conf)
     /*
      * Create EO "A"
      */
-    eo_ctx = &perf_eo_context[2*i].eo_ctx;
+    eo_ctx = &perf_shm->perf_eo_context[2*i].eo_ctx;
 
     eo      = em_eo_create("appl a", perf_start, NULL, perf_stop, NULL, perf_receive_a, eo_ctx);
     queue_a = em_queue_create("queue A", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
@@ -281,7 +304,7 @@ test_init(example_conf_t *const example_conf)
     /*
      * Create EO "B"
      */
-    eo_ctx = &perf_eo_context[2*i + 1].eo_ctx;
+    eo_ctx = &perf_shm->perf_eo_context[2*i + 1].eo_ctx;
 
     eo      = em_eo_create("appl b", perf_start, NULL, perf_stop, NULL, perf_receive_b, eo_ctx);
     queue_b = em_queue_create("queue B", QUEUE_TYPE, EM_QUEUE_PRIO_NORMAL, EM_QUEUE_GROUP_DEFAULT);
@@ -397,7 +420,7 @@ perf_receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queu
 #endif
   
   core   = em_core_id();
-  events = core_stat[core].events;
+  events = perf_shm->core_stat[core].events;
   perf   = em_event_pointer(event);
   
   dest_queue = perf->dest;
@@ -408,19 +431,19 @@ perf_receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queu
    */
   if(ENV_UNLIKELY(events == 0))
   {
-    core_stat[core].begin_cycles = env_get_cycle();
+    perf_shm->core_stat[core].begin_cycles = env_get_cycle();
     events += 1;
   }
   else if(ENV_UNLIKELY(events > PRINT_EVENT_COUNT))
   {
-    core_stat[core].end_cycles   = env_get_cycle();
-    core_stat[core].print_count += 1;
+    perf_shm->core_stat[core].end_cycles   = env_get_cycle();
+    perf_shm->core_stat[core].print_count += 1;
     
     /* Print measurement result */
-    print_result(&core_stat[core]);
+    print_result(&perf_shm->core_stat[core]);
     
     /* Restart the measurement */
-    core_stat[core].begin_cycles = env_get_cycle();
+    perf_shm->core_stat[core].begin_cycles = env_get_cycle();
     events = 0;
   }
   else {
@@ -475,7 +498,7 @@ perf_receive_a(void* eo_context, em_event_t event, em_event_type_t type, em_queu
 
   em_send(event, dest_queue);
 
-  core_stat[core].events = events;
+  perf_shm->core_stat[core].events = events;
 }
 
 
@@ -550,14 +573,14 @@ perf_receive_b(void* eo_context, em_event_t event, em_event_type_t type, em_queu
 
 
   core   = em_core_id();
-  events = core_stat[core].events + 1;
+  events = perf_shm->core_stat[core].events + 1;
 
 
   perf->dest = queue;
 
   em_send(event, dest_queue);
 
-  core_stat[core].events = events;
+  perf_shm->core_stat[core].events = events;
 }
 
 
